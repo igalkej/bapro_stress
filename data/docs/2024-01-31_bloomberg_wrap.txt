@@ -1,0 +1,31 @@
+BLOOMBERG MARKET WRAP — ARGENTINA & EM DESK
+Wednesday, January 31, 2024
+
+Argentine markets closed January on a firmly constructive note despite a modest global volatility spike following the Fed's January FOMC decision. Argentine assets proved resilient — a notable contrast to January's earlier episodes when global shocks amplified domestic stress. The resilience reflects the dramatically improved macro backdrop relative to the start of the month.
+
+FED FOMC IMPACT
+
+As expected, the Federal Reserve kept the federal funds rate unchanged at 5.25–5.50%. Chair Powell's press conference, however, pushed back on imminent March cuts, stating that the Committee needs "greater confidence" in sustainable progress toward 2% inflation before cutting. March cut probability fell from 48% to 38% in the aftermath, and the 10-year UST yield jumped 7 bps to 4.05%. EM assets broadly felt some pressure — EMBI Global tightened earlier in the day then retraced about half after the press conference.
+
+ARGENTINA'S RESILIENCE
+
+In contrast to the January 5 and January 11 episodes, when similar global Fed-related shocks triggered cascading Argentine-specific stress, today Argentine assets absorbed the Fed impact with minimal disruption. GD30 dipped 0.3 cents intraday (a fraction of the 2–3 cent moves seen in the stress episodes) before recovering to flat. EMBI+ spread briefly widened to 1,558 bps from the morning's 1,544 bps low but closed at 1,548 bps — essentially unchanged on the day. The CCL rose fractionally to 997 from 991, leaving the FX gap at 22.6% — well within the orderly range.
+
+This resilience is not coincidental. The BCRA's strong reserve position (gross $23.74 billion, improving trajectory), the IMF program in good standing, and the January trade surplus context all provide a structural buffer that was absent at the beginning of the month. The market has re-rated Argentina's fundamentals, and external shocks now require a much higher magnitude to trigger the same stress response.
+
+JANUARY SCORECARD — CLOSE
+
+January was a tale of three stress spikes and a decisive recovery:
+- Jan 5: IMF negotiation uncertainty + strong U.S. payrolls → EMBI+ 1,841 bps peak
+- Jan 11: Reserve credibility + U.S. CPI shock → EMBI+ 1,896 bps peak
+- Jan 17: IMF program review fears → EMBI+ 1,936 bps peak (monthly high)
+- Jan 23: IMF review passes → compression begins
+- Jan 31: EMBI+ 1,548 bps — month's close, near cycle tights
+
+GD30 ended January at 88.4 cents — up approximately 3.2 cents from the January 2 open. The Merval is up roughly 8% in CCL-dollar terms for the month. Gross reserves gained approximately $1.6 billion. The FX gap narrowed from 27% to 22.6%.
+
+FORWARD OUTLOOK
+
+February begins with the most constructive Argentine backdrop since the post-restructuring honeymoon of September 2020. The IMF program is on track, fiscal adjustment is ahead of schedule, reserves are recovering, and disinflation is underway. The primary risk remains a global liquidity shock or domestic political friction (Congress vs. executive branch on emergency decrees). Our base case: continued orderly compression toward 1,400–1,500 bps EMBI over February–March.
+
+SUMMARY: Orderly close to a turbulent month. The carry demand environment is firmly established. Argentine credit is the standout EM performer of January 2024. Compression thesis intact for February. January's lesson: the government's credibility, when tested under stress, has proven sufficient to attract carry demand and prevent full unraveling — a meaningful regime shift from 2023.
