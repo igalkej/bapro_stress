@@ -15,11 +15,11 @@ Run:
     python dashboard/app.py
 """
 import sys
-sys.path.insert(0, "/workspace")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import json
 import os
-import pickle
 
 import numpy as np
 import pandas as pd
@@ -29,15 +29,14 @@ from plotly.subplots import make_subplots
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import text
 
-from config import ARTIFACTS_DIR, EMBEDDING_MODEL
+from config import ARTIFACTS_DIR, EMBEDDING_MODEL, TIDE_MODEL_PATH
 from db.connection import get_engine
 
 # ---------------------------------------------------------------------------
 # Globals / lazy loading
 # ---------------------------------------------------------------------------
 _engine = None
-_pca = None
-_xgb = None
+_tide_model = None
 _st_model = None
 _metadata = None
 
@@ -50,22 +49,21 @@ def get_db_engine():
 
 
 def load_artifacts():
-    global _pca, _xgb, _metadata
-    pca_path = os.path.join(ARTIFACTS_DIR, "pca.pkl")
-    model_path = os.path.join(ARTIFACTS_DIR, "xgb_model.pkl")
+    global _tide_model, _metadata
     meta_path = os.path.join(ARTIFACTS_DIR, "metadata.json")
 
-    if _pca is None and os.path.exists(pca_path):
-        with open(pca_path, "rb") as f:
-            _pca = pickle.load(f)
-    if _xgb is None and os.path.exists(model_path):
-        with open(model_path, "rb") as f:
-            _xgb = pickle.load(f)
     if _metadata is None and os.path.exists(meta_path):
         with open(meta_path) as f:
             _metadata = json.load(f)
 
-    return _pca, _xgb, _metadata
+    if _tide_model is None and os.path.exists(TIDE_MODEL_PATH):
+        try:
+            from darts.models import TiDEModel
+            _tide_model = TiDEModel.load(TIDE_MODEL_PATH)
+        except Exception:
+            pass
+
+    return _tide_model, _metadata
 
 
 def get_st_model():
@@ -234,12 +232,13 @@ def _history_layout():
                             ),
                         ],
                     ),
-                    # Feature importances
+                    # Model quality panel
                     html.Div(
+                        id="model-quality-panel",
                         style={"flex": "1", "backgroundColor": "#161b22", "borderRadius": "8px", "padding": "16px"},
                         children=[
-                            html.H4("XGBoost Feature Importances", style={"color": "#e6edf3", "marginTop": 0, "fontSize": "14px"}),
-                            dcc.Graph(id="importance-chart", style={"height": "380px"}),
+                            html.H4("TiDE Model Quality", style={"color": "#e6edf3", "marginTop": 0, "fontSize": "14px"}),
+                            html.Div(id="model-quality-content"),
                         ],
                     ),
                 ],
@@ -327,7 +326,7 @@ def render_ts_chart(data):
         go.Scatter(
             x=df["date"],
             y=df["stress_pred"],
-            name="XGBoost Prediction",
+            name="TiDE Prediction",
             line={"color": "#f78166", "width": 2, "dash": "dot"},
             mode="lines+markers",
             marker={"size": 7, "symbol": "diamond"},
@@ -390,47 +389,101 @@ def update_doc_viewer(selected_date, data):
 
 
 @app.callback(
-    Output("importance-chart", "figure"),
+    Output("model-quality-content", "children"),
     Input("history-store", "data"),
 )
-def render_importance_chart(_):
-    _, _, metadata = load_artifacts()
+def render_model_quality(_):
+    _, metadata = load_artifacts()
 
     if metadata is None:
-        empty = go.Figure()
-        empty.update_layout(
-            paper_bgcolor="#161b22",
-            plot_bgcolor="#161b22",
-            font_color="#8b949e",
-            title="No model loaded — run training/train.py first",
+        return html.P(
+            "No model loaded. Run training/train.py first.",
+            style={"color": "#8b949e", "fontSize": "13px"},
         )
-        return empty
 
-    importances = metadata.get("feature_importances", {})
-    if not importances:
-        return go.Figure()
-
-    items = sorted(importances.items(), key=lambda x: x[1], reverse=True)[:15]
-    labels = [k for k, _ in items]
-    values = [v for _, v in items]
-
-    fig = go.Figure(
-        go.Bar(
-            x=values,
-            y=labels,
-            orientation="h",
-            marker_color="#388bfd",
-        )
+    _cell = lambda txt, bold=False: html.Td(
+        txt,
+        style={
+            "padding": "6px 12px",
+            "color": "#e6edf3" if bold else "#8b949e",
+            "fontWeight": "600" if bold else "normal",
+            "fontSize": "13px",
+            "borderBottom": "1px solid #21262d",
+        },
     )
-    fig.update_layout(
-        paper_bgcolor="#161b22",
-        plot_bgcolor="#161b22",
-        font_color="#e6edf3",
-        xaxis={"gridcolor": "#21262d", "title": "Importance"},
-        yaxis={"autorange": "reversed"},
-        margin={"t": 10, "b": 40, "l": 90, "r": 20},
+
+    def metric_row(split, mae_key, rmse_key):
+        return html.Tr([
+            _cell(split, bold=True),
+            _cell(f"{metadata.get(mae_key, 'N/A'):.4f}" if isinstance(metadata.get(mae_key), float) else "N/A"),
+            _cell(f"{metadata.get(rmse_key, 'N/A'):.4f}" if isinstance(metadata.get(rmse_key), float) else "N/A"),
+            _cell(str(metadata.get(f"{split.lower()}_samples", "N/A"))),
+        ])
+
+    header_style = {
+        "padding": "6px 12px",
+        "color": "#388bfd",
+        "fontSize": "12px",
+        "fontWeight": "600",
+        "borderBottom": "2px solid #30363d",
+        "textTransform": "uppercase",
+    }
+
+    metrics_table = html.Table(
+        style={"width": "100%", "borderCollapse": "collapse", "marginBottom": "20px"},
+        children=[
+            html.Thead(html.Tr([
+                html.Th("Split", style=header_style),
+                html.Th("MAE", style=header_style),
+                html.Th("RMSE", style=header_style),
+                html.Th("Samples", style=header_style),
+            ])),
+            html.Tbody([
+                metric_row("Train", "train_mae", "train_rmse"),
+                metric_row("Val", "val_mae", "val_rmse"),
+                metric_row("Test", "test_mae", "test_rmse"),
+            ]),
+        ],
     )
-    return fig
+
+    # TiDE config
+    tp = metadata.get("tide_params", {})
+    config_items = [
+        ("Model", "Darts TiDE"),
+        ("Input window", str(tp.get("input_chunk_length", ""))),
+        ("Output window", str(tp.get("output_chunk_length", ""))),
+        ("Hidden size", str(tp.get("hidden_size", ""))),
+        ("Encoder layers", str(tp.get("num_encoder_layers", ""))),
+        ("Decoder out dim", str(tp.get("decoder_output_dim", ""))),
+        ("Dropout", str(tp.get("dropout", ""))),
+        ("Epochs", str(tp.get("n_epochs", ""))),
+        ("Batch size", str(tp.get("batch_size", ""))),
+        ("LR", str(tp.get("lr", ""))),
+        ("Past covariates", "384-dim embeddings"),
+        ("Version", metadata.get("model_version", "")[:15]),
+    ]
+
+    config_rows = [
+        html.Tr([
+            html.Td(k, style={"color": "#8b949e", "fontSize": "12px", "padding": "3px 12px 3px 0"}),
+            html.Td(v, style={"color": "#e6edf3", "fontSize": "12px", "padding": "3px 0"}),
+        ])
+        for k, v in config_items
+    ]
+
+    config_table = html.Table(
+        style={"width": "100%", "borderCollapse": "collapse"},
+        children=[html.Tbody(config_rows)],
+    )
+
+    return html.Div([
+        html.P("Evaluation Metrics", style={"color": "#8b949e", "fontSize": "11px",
+                                             "textTransform": "uppercase", "marginBottom": "8px"}),
+        metrics_table,
+        html.P("Model Configuration", style={"color": "#8b949e", "fontSize": "11px",
+                                              "textTransform": "uppercase", "marginBottom": "8px"}),
+        config_table,
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -447,18 +500,72 @@ def score_new_document(n_clicks, text):
     if not text or not text.strip():
         return html.P("Please paste a document first.", style={"color": "#f78166"})
 
-    pca, xgb_model, _ = load_artifacts()
-    if pca is None or xgb_model is None:
+    tide_model, _ = load_artifacts()
+    if tide_model is None:
         return html.P(
-            "Model artifacts not found. Run the training pipeline first.",
+            "TiDE model not found. Run training/train.py first.",
             style={"color": "#f78166"},
         )
 
     try:
+        import json as _json
+        import numpy as _np
+        import pandas as _pd
+        from darts import TimeSeries as _TS
+        from sqlalchemy import text as _text
+
+        # Encode new document
         st_model = get_st_model()
-        vec = st_model.encode([text], convert_to_numpy=True)
-        vec_pca = pca.transform(vec)
-        score = float(xgb_model.predict(vec_pca)[0])
+        new_emb = st_model.encode([text], convert_to_numpy=True)[0].tolist()
+
+        # Load last input_chunk_length data points from DB for context
+        n_ctx = tide_model.input_chunk_length
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            rows = conn.execute(
+                _text(
+                    """
+                    SELECT d.doc_date, e.embedding_vector, s.stress_value
+                    FROM documents d
+                    JOIN embeddings   e ON e.doc_id     = d.id
+                    JOIN stress_index s ON s.index_date = d.doc_date
+                    ORDER BY d.doc_date DESC
+                    LIMIT :n
+                    """
+                ),
+                {"n": n_ctx},
+            ).fetchall()
+        rows = list(reversed(rows))
+
+        dates = [_pd.Timestamp(str(r.doc_date)) for r in rows]
+        stress_vals = [float(r.stress_value) for r in rows]
+        embeddings = [
+            _json.loads(r.embedding_vector) if isinstance(r.embedding_vector, str)
+            else list(r.embedding_vector)
+            for r in rows
+        ]
+
+        # Append new doc embedding as covariate for prediction step
+        delta = dates[-1] - dates[-2] if len(dates) >= 2 else _pd.Timedelta(days=1)
+        next_date = dates[-1] + delta
+        all_dates = dates + [next_date]
+        all_embs = embeddings + [new_emb]
+
+        target_df = _pd.DataFrame(
+            {"stress_value": stress_vals}, index=_pd.DatetimeIndex(dates)
+        )
+        target_series = _TS.from_dataframe(target_df, freq=None)
+
+        dim = len(new_emb)
+        cov_df = _pd.DataFrame(
+            _np.array(all_embs, dtype=_np.float32),
+            index=_pd.DatetimeIndex(all_dates),
+            columns=[f"emb_{i}" for i in range(dim)],
+        )
+        cov_series = _TS.from_dataframe(cov_df, freq=None)
+
+        pred = tide_model.predict(n=1, series=target_series, past_covariates=cov_series)
+        score = float(pred.values()[0][0])
     except Exception as exc:
         return html.P(f"Error: {exc}", style={"color": "#f78166"})
 

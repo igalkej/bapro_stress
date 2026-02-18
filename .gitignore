@@ -2,7 +2,11 @@
 __pycache__/
 *.pyc
 *.pyo
+*.db
 .braprostress_venv/
 .idea/
 artifacts/*.pkl
 artifacts/*.json
+artifacts/*.pt
+artifacts/*.ckpt
+artifacts/tide_bapro/

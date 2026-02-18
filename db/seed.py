@@ -1,31 +1,25 @@
-"""One-time seeder: loads data/docs/*.txt + data/stress_index.csv into PostgreSQL."""
-import os
-import sys
+"""One-time seeder: loads data/docs/*.txt + data/stress_index.csv into the DB."""
 import csv
+import sys
 from pathlib import Path
 
-# Allow imports from repo root when running as a script
-sys.path.insert(0, "/workspace")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import text
 from db.connection import get_engine
-
-DOCS_DIR = Path("/workspace/data/docs")
-STRESS_CSV = Path("/workspace/data/stress_index.csv")
+from config import DOCS_DIR, STRESS_CSV
 
 
 def seed_documents(conn):
     doc_files = sorted(DOCS_DIR.glob("*.txt"))
     if not doc_files:
-        print("No .txt files found in data/docs/. Aborting.")
+        print(f"No .txt files found in {DOCS_DIR}. Aborting.")
         return 0
 
     inserted = 0
     for doc_path in doc_files:
         filename = doc_path.name
-        # Parse date from filename: YYYY-MM-DD_<style>.txt
         date_str = filename.split("_")[0]
-        # Determine doc_type from filename
         if "bloomberg" in filename:
             doc_type = "bloomberg_wrap"
         elif "bluefin" in filename:
@@ -40,18 +34,11 @@ def seed_documents(conn):
         result = conn.execute(
             text(
                 """
-                INSERT INTO documents (doc_date, filename, doc_type, content)
+                INSERT OR IGNORE INTO documents (doc_date, filename, doc_type, content)
                 VALUES (:doc_date, :filename, :doc_type, :content)
-                ON CONFLICT (doc_date) DO NOTHING
-                RETURNING id
                 """
             ),
-            {
-                "doc_date": date_str,
-                "filename": filename,
-                "doc_type": doc_type,
-                "content": content,
-            },
+            {"doc_date": date_str, "filename": filename, "doc_type": doc_type, "content": content},
         )
         if result.rowcount:
             inserted += 1
@@ -71,10 +58,8 @@ def seed_stress_index(conn):
             result = conn.execute(
                 text(
                     """
-                    INSERT INTO stress_index (index_date, stress_value)
+                    INSERT OR IGNORE INTO stress_index (index_date, stress_value)
                     VALUES (:index_date, :stress_value)
-                    ON CONFLICT (index_date) DO NOTHING
-                    RETURNING id
                     """
                 ),
                 {"index_date": row["date"], "stress_value": float(row["stress_value"])},
@@ -93,11 +78,10 @@ def main():
 
     print(f"Seeded {docs_inserted} documents and {stress_inserted} stress index rows.")
 
-    # Quick verification
     with engine.connect() as conn:
         doc_count = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
         stress_count = conn.execute(text("SELECT COUNT(*) FROM stress_index")).scalar()
-    print(f"Total in DB → documents: {doc_count}, stress_index: {stress_count}")
+    print(f"Total in DB: documents={doc_count}, stress_index={stress_count}")
 
 
 if __name__ == "__main__":
