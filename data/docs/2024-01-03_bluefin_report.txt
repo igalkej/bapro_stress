@@ -1,0 +1,24 @@
+BLUEFIN ECONOMIC COMMENTARY — SOUTHERN CONE MARKETS
+Wednesday, January 3, 2024
+
+The Argentine financial system entered the second trading day of 2024 with stability broadly intact, though our desk is watching several structural vulnerabilities that could amplify any external shock in the coming weeks. Today's session was characterized by thin volumes — a typical carry-over from the extended New Year's holiday period — but the directional signals were constructive, particularly in the sovereign bond complex.
+
+FX DYNAMICS
+
+The official wholesale FX rate (MULC) remained anchored near the crawling peg trajectory set at roughly 2% monthly depreciation by the Milei economic team. This pace is well below current inflation expectations of 20–25% monthly and implies a continued real appreciation of the official rate, which has historically been a precursor to reserve depletion if not offset by aggressive demand compression. For now, import restrictions and the mandatory MULC settlement of 25% of agro-export proceeds (the remainder going through the blend channel) are maintaining central bank purchasing power.
+
+The FX gap between the official rate and the blue-chip swap (CCL) closed at approximately 28.3%, down from a peak of nearly 200% in late October 2023 under the prior administration. Our analysts view a gap below 30% as broadly manageable from a capital account and trade distortion standpoint, though convergence to zero remains a medium-term challenge given the pace of peso monetary emission to finance the quasi-fiscal deficit from BCRA remunerated liabilities.
+
+RESERVES AND LIQUIDITY
+
+BCRA gross reserves printed at $22.05 billion. The central bank conducted FX operations to purchase approximately $70 million in the MULC session — a continuation of the accumulation trend. Crucially, the stock of peso-denominated BCRA remunerated liabilities (LELIQs and their successor instruments) continues to grow in absolute terms, representing a material quasi-fiscal risk if pass-through to inflation re-accelerates.
+
+LOCAL RATES AND BONDS
+
+Domestic peso curve was relatively quiet. Treasury bills cleared at a secondary market yield around 120% annual effective rate — implying a strong real yield environment given our near-term inflation nowcast of 20% monthly. This environment is sustaining carry demand from domestic institutional investors (primarily FCI money market funds), which in turn is supporting the Treasury's ability to rollover peso debt without central bank monetary financing — a key pillar of the current fiscal framework.
+
+Global context is supportive: the Fed's pivot narrative is intact, China's stimulus signals are generating mild risk-on sentiment in EM markets broadly, and Argentine bonds continue to benefit from the post-election re-rating thesis.
+
+CONCLUSION
+
+A stable, orderly session with no acute stress signals. We maintain our constructive tactical view on Argentine hard-currency bonds while monitoring peso monetary aggregates and the pace of quasi-fiscal cleanup for medium-term risk triggers.

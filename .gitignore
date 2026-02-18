@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.braprostress_venv/
+.idea/
+artifacts/*.pkl
+artifacts/*.json
