@@ -10,3 +10,7 @@ artifacts/*.json
 artifacts/*.pt
 artifacts/*.ckpt
 artifacts/tide_bapro/
+logs/
+credentials/
+SCRATCHPAD.md
+notebooks/*_executed.ipynb

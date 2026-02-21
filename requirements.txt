@@ -7,3 +7,11 @@ pandas==2.2.2
 numpy==1.26.4
 dash==2.17.1
 plotly==5.22.0
+darts==0.41.0
+feedparser==6.0.11
+yfinance==0.2.51
+pandas-datareader==0.10.0
+requests==2.32.5
+fredapi==0.5.1
+jupyter==1.1.1
+nbconvert==7.16.4

@@ -29,3 +29,24 @@ CREATE TABLE IF NOT EXISTS predictions (
     model_version     VARCHAR(255),
     predicted_at      TIMESTAMP DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS articles (
+    id            SERIAL PRIMARY KEY,
+    date          DATE         NOT NULL,
+    url           VARCHAR(2048) NOT NULL UNIQUE,
+    headline      TEXT,
+    gdelt_tone    FLOAT,
+    gdelt_themes  TEXT,
+    source        VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS article_embeddings (
+    id        INTEGER PRIMARY KEY REFERENCES articles(id),
+    embedding FLOAT[] NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fsi_target (
+    id        SERIAL PRIMARY KEY,
+    date      DATE  NOT NULL UNIQUE,
+    fsi_value FLOAT NOT NULL
+);
