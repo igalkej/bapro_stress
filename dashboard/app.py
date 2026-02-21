@@ -84,15 +84,15 @@ def fetch_history():
             text(
                 """
                 SELECT
-                    d.doc_date,
-                    d.content,
-                    d.doc_type,
+                    a.date,
+                    a.headline       AS content,
+                    a.source         AS doc_type,
                     p.stress_score_pred,
-                    s.stress_value
+                    f.fsi_value      AS stress_actual
                 FROM predictions p
-                JOIN documents d   ON d.id = p.doc_id
-                JOIN stress_index s ON s.index_date = d.doc_date
-                ORDER BY d.doc_date
+                JOIN articles a    ON a.id = p.doc_id
+                JOIN fsi_target f  ON f.date = a.date
+                ORDER BY a.date
                 """
             )
         ).fetchall()
@@ -103,11 +103,11 @@ def fetch_history():
     return pd.DataFrame(
         [
             {
-                "date": str(r.doc_date),
-                "content": r.content,
-                "doc_type": r.doc_type,
+                "date": str(r.date)[:10],
+                "content": r.content or "",
+                "doc_type": r.doc_type or "",
                 "stress_pred": r.stress_score_pred,
-                "stress_actual": r.stress_value,
+                "stress_actual": r.stress_actual,
             }
             for r in rows
         ]
@@ -131,7 +131,7 @@ app.layout = html.Div(
                     style={"color": "#e6edf3", "margin": 0, "fontSize": "22px"},
                 ),
                 html.P(
-                    "Argentina sovereign credit stress — January 2024",
+                    "Argentina sovereign credit stress — real-time FSI",
                     style={"color": "#8b949e", "margin": "4px 0 0", "fontSize": "13px"},
                 ),
             ],
@@ -525,11 +525,11 @@ def score_new_document(n_clicks, text):
             rows = conn.execute(
                 _text(
                     """
-                    SELECT d.doc_date, e.embedding_vector, s.stress_value
-                    FROM documents d
-                    JOIN embeddings   e ON e.doc_id     = d.id
-                    JOIN stress_index s ON s.index_date = d.doc_date
-                    ORDER BY d.doc_date DESC
+                    SELECT f.date, ae.embedding, f.fsi_value
+                    FROM fsi_target f
+                    JOIN articles a ON a.date = f.date
+                    JOIN article_embeddings ae ON ae.id = a.id
+                    ORDER BY f.date DESC
                     LIMIT :n
                     """
                 ),
@@ -537,11 +537,10 @@ def score_new_document(n_clicks, text):
             ).fetchall()
         rows = list(reversed(rows))
 
-        dates = [_pd.Timestamp(str(r.doc_date)) for r in rows]
-        stress_vals = [float(r.stress_value) for r in rows]
+        dates = [_pd.Timestamp(str(r[0])[:10]) for r in rows]
+        stress_vals = [float(r[2]) for r in rows]
         embeddings = [
-            _json.loads(r.embedding_vector) if isinstance(r.embedding_vector, str)
-            else list(r.embedding_vector)
+            _json.loads(r[1]) if isinstance(r[1], str) else list(r[1])
             for r in rows
         ]
 
