@@ -33,6 +33,27 @@ CREATE TABLE IF NOT EXISTS predictions (
     model_version     TEXT,
     predicted_at      TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS articles (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    date          TEXT NOT NULL,
+    url           TEXT NOT NULL UNIQUE,
+    headline      TEXT,
+    gdelt_tone    REAL,
+    gdelt_themes  TEXT,
+    source        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS article_embeddings (
+    id        INTEGER PRIMARY KEY REFERENCES articles(id),
+    embedding TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fsi_target (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    date      TEXT NOT NULL UNIQUE,
+    fsi_value REAL NOT NULL
+);
 """
 
 
