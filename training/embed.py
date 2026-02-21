@@ -1,9 +1,9 @@
 """
-Embedding extraction step.
+Embedding catch-up step.
 
-Encodes each document with sentence-transformers (all-MiniLM-L6-v2) and
-stores the 384-dim vector as a JSON string in the embeddings table.
-Idempotent: already-embedded documents are skipped.
+Encodes any articles that are missing an embedding and stores the 384-dim
+vector in article_embeddings. Embed text: headline + gdelt_themes.
+Idempotent: already-embedded articles are skipped.
 
 Usage:
     python training/embed.py
@@ -22,30 +22,49 @@ from db.connection import get_engine
 from config import EMBEDDING_MODEL
 
 
-def fetch_unembedded_docs(conn):
+def fetch_unembedded_articles(conn):
     return conn.execute(
         text(
             """
-            SELECT d.id, d.content
-            FROM documents d
-            LEFT JOIN embeddings e ON e.doc_id = d.id
-            WHERE e.id IS NULL
-            ORDER BY d.doc_date
+            SELECT a.id, a.headline, a.gdelt_themes
+            FROM articles a
+            LEFT JOIN article_embeddings ae ON ae.id = a.id
+            WHERE ae.id IS NULL
+            ORDER BY a.date
             """
         )
     ).fetchall()
 
 
-def store_embedding(conn, doc_id: int, vector: np.ndarray, model_name: str):
-    conn.execute(
-        text(
-            """
-            INSERT OR IGNORE INTO embeddings (doc_id, embedding_vector, embedding_model)
-            VALUES (:doc_id, :vec, :model)
-            """
-        ),
-        {"doc_id": doc_id, "vec": json.dumps(vector.tolist()), "model": model_name},
-    )
+def build_embed_text(headline, gdelt_themes) -> str:
+    hl = (headline or "").strip()
+    themes_raw = (gdelt_themes or "").strip()
+    themes_list = [t for t in themes_raw.split(",") if t] if themes_raw else []
+    return (hl + " " + " ".join(themes_list)).strip()
+
+
+def store_embedding(conn, art_id: int, vector: np.ndarray, is_pg: bool):
+    if is_pg:
+        conn.execute(
+            text(
+                """
+                INSERT INTO article_embeddings (id, embedding)
+                VALUES (:id, :emb)
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {"id": art_id, "emb": vector.tolist()},
+        )
+    else:
+        conn.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO article_embeddings (id, embedding)
+                VALUES (:id, :emb)
+                """
+            ),
+            {"id": art_id, "emb": json.dumps(vector.tolist())},
+        )
 
 
 def main():
@@ -53,26 +72,27 @@ def main():
     model = SentenceTransformer(EMBEDDING_MODEL)
 
     engine = get_engine()
+    is_pg = not engine.url.drivername.startswith("sqlite")
 
     with engine.connect() as conn:
-        docs = fetch_unembedded_docs(conn)
+        articles = fetch_unembedded_articles(conn)
 
-    if not docs:
-        print("All documents already have embeddings. Nothing to do.")
+    if not articles:
+        print("All articles already have embeddings. Nothing to do.")
         return
 
-    print(f"Encoding {len(docs)} documents...")
-    texts = [row.content for row in docs]
+    print(f"Encoding {len(articles)} articles...")
+    texts = [build_embed_text(row.headline, row.gdelt_themes) for row in articles]
     embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
 
     with engine.begin() as conn:
-        for row, vec in zip(docs, embeddings):
-            store_embedding(conn, row.id, vec, EMBEDDING_MODEL)
+        for row, vec in zip(articles, embeddings):
+            store_embedding(conn, row.id, vec, is_pg)
 
-    print(f"Stored {len(docs)} embeddings in the database.")
+    print(f"Stored {len(articles)} embeddings in article_embeddings.")
 
     with engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM embeddings")).scalar()
+        count = conn.execute(text("SELECT COUNT(*) FROM article_embeddings")).scalar()
     print(f"Total embeddings in DB: {count}")
 
 
