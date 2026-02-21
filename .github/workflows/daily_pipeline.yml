@@ -1,0 +1,48 @@
+name: Daily Pipeline
+
+on:
+  schedule:
+    # Mon-Fri at 06:00 UTC
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Target date (YYYY-MM-DD). Defaults to yesterday."
+        required: false
+        default: ""
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build app image
+        run: docker compose build app
+
+      - name: Start PostgreSQL
+        run: docker compose up -d postgres
+
+      - name: Wait for PostgreSQL to be healthy
+        run: |
+          for i in $(seq 1 30); do
+            docker compose exec postgres pg_isready -U bapro -d bapro_stress && break
+            echo "Waiting for postgres... attempt $i"
+            sleep 2
+          done
+
+      - name: Run daily pipeline
+        env:
+          TARGET_DATE: ${{ github.event.inputs.target_date }}
+        run: |
+          if [ -n "$TARGET_DATE" ]; then
+            docker compose run --rm app python src/ingestion/daily_pipeline.py --date "$TARGET_DATE"
+          else
+            docker compose run --rm app python src/ingestion/daily_pipeline.py
+          fi
+
+      - name: Stop services
+        if: always()
+        run: docker compose down
