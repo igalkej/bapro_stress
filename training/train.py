@@ -36,7 +36,7 @@ TRAIN_PCT = 0.70
 VAL_PCT   = 0.15
 # TEST_PCT  = 0.15  (remainder)
 
-INPUT_CHUNK  = 5
+INPUT_CHUNK  = 2
 OUTPUT_CHUNK = 1
 
 
@@ -93,13 +93,16 @@ def load_dataset(engine):
         d: np.mean(vecs, axis=0) for d, vecs in date_vecs.items()
     }
 
+    # Determine embedding dimension from first available vec
+    emb_dim = next(iter(mean_vecs.values())).shape[0] if mean_vecs else 384
+    zero_vec = np.zeros(emb_dim, dtype=np.float32)
+
     records = []
     for row in fsi_rows:
         date_str = str(row[0])[:10]
         fsi_val = float(row[1])
-        vec = mean_vecs.get(date_str)
-        if vec is None:
-            continue  # skip days with no articles
+        # Use zero vector for days without articles so the target has no gaps
+        vec = mean_vecs.get(date_str, zero_vec)
         records.append({"date": date_str, "vec": vec, "fsi_value": fsi_val})
 
     if not records:
@@ -120,7 +123,8 @@ def load_dataset(engine):
 
 def build_target_series(df):
     return TimeSeries.from_dataframe(
-        df, time_col="date", value_cols="fsi_value", freq=None
+        df, time_col="date", value_cols="fsi_value",
+        fill_missing_dates=True, freq="B"
     )
 
 
@@ -133,7 +137,10 @@ def build_covariate_series(df):
         columns=[f"emb_{i}" for i in range(dim)],
     )
     cov_df.index = pd.DatetimeIndex(cov_df.index)
-    return TimeSeries.from_dataframe(cov_df, freq=None)
+    ts = TimeSeries.from_dataframe(cov_df, fill_missing_dates=True, freq="B")
+    # Fill NaN (days without articles) with zero vectors
+    filled_df = ts.to_dataframe().fillna(0.0)
+    return TimeSeries.from_dataframe(filled_df, freq="B")
 
 
 # ---------------------------------------------------------------------------
@@ -163,66 +170,35 @@ def evaluate_split(model, target, covariates, start, name):
 
 def write_predictions(engine, df, preds_series, model_version):
     """
-    Write predictions to DB, linked to the MIN(id) article for each date.
-    Deletes existing predictions for the affected dates before inserting.
+    Write predictions to DB keyed by date.
     """
     is_pg = not engine.url.drivername.startswith("sqlite")
 
     preds_df = preds_series.to_dataframe().reset_index()
     preds_df.columns = ["time", "stress_score_pred"]
     preds_df["time"] = pd.to_datetime(preds_df["time"])
-    preds_df["date_str"] = preds_df["time"].dt.strftime("%Y-%m-%d")
-
-    # Get MIN(id) article per date
-    date_strs = preds_df["date_str"].tolist()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                "SELECT date, MIN(id) AS min_id FROM articles "
-                "WHERE date IN :dates GROUP BY date"
-            ),
-            {"dates": tuple(date_strs)},
-        ).fetchall()
-    date_to_art_id = {str(r[0])[:10]: int(r[1]) for r in rows}
-
-    doc_ids = list(date_to_art_id.values())
-    if not doc_ids:
-        print("No matching article ids found for prediction dates.")
-        return
-
-    # Delete existing predictions for these article ids
-    placeholders = ",".join(f":id_{i}" for i in range(len(doc_ids)))
-    params = {f"id_{i}": doc_ids[i] for i in range(len(doc_ids))}
+    preds_df = preds_df.dropna(subset=["stress_score_pred"])
 
     with engine.begin() as conn:
-        conn.execute(
-            text(f"DELETE FROM predictions WHERE doc_id IN ({placeholders})"),
-            params,
-        )
         for _, row in preds_df.iterrows():
-            art_id = date_to_art_id.get(row["date_str"])
-            if art_id is None:
-                continue
+            date_str = row["time"].strftime("%Y-%m-%d")
+            pred_val = float(row["stress_score_pred"])
             if is_pg:
                 sql = text(
                     """
-                    INSERT INTO predictions (doc_id, stress_score_pred, model_version)
-                    VALUES (:doc_id, :pred, :version)
-                    ON CONFLICT DO NOTHING
+                    INSERT INTO predictions (date, stress_score_pred, model_version)
+                    VALUES (:date, :pred, :version)
+                    ON CONFLICT (date, model_version) DO UPDATE SET stress_score_pred = EXCLUDED.stress_score_pred
                     """
                 )
             else:
                 sql = text(
                     """
-                    INSERT OR IGNORE INTO predictions (doc_id, stress_score_pred, model_version)
-                    VALUES (:doc_id, :pred, :version)
+                    INSERT OR REPLACE INTO predictions (date, stress_score_pred, model_version)
+                    VALUES (:date, :pred, :version)
                     """
                 )
-            conn.execute(sql, {
-                "doc_id": art_id,
-                "pred": float(row["stress_score_pred"]),
-                "version": model_version,
-            })
+            conn.execute(sql, {"date": date_str, "pred": pred_val, "version": model_version})
 
 
 # ---------------------------------------------------------------------------

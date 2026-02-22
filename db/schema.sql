@@ -24,10 +24,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
 
 CREATE TABLE IF NOT EXISTS predictions (
     id                SERIAL PRIMARY KEY,
-    doc_id            INTEGER REFERENCES documents(id),
+    date              DATE NOT NULL,
     stress_score_pred FLOAT  NOT NULL,
     model_version     VARCHAR(255),
-    predicted_at      TIMESTAMP DEFAULT NOW()
+    predicted_at      TIMESTAMP DEFAULT NOW(),
+    UNIQUE (date, model_version)
 );
 
 CREATE TABLE IF NOT EXISTS articles (

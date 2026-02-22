@@ -26,11 +26,11 @@ from db.connection import get_engine
 
 GDELT_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_QUERY = (
-    "sourcecountry:AR (economia finanzas deuda bonos mercado crisis BCRA Merval peso dolar)"
+    "sourcecountry:AR (economia OR finanzas OR deuda OR bonos OR mercado OR crisis OR BCRA OR Merval OR peso OR dolar)"
 )
 GDELT_FIELDS = "title,url,tone,themes,seendate,sourcecountry"
 GDELT_MAXRECORDS = 250
-GDELT_REQUEST_DELAY = 0.5  # seconds between API calls
+GDELT_REQUEST_DELAY = 6  # seconds between API calls (GDELT rate limit: ~10 req/min)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
