@@ -42,15 +42,8 @@ def _last_business_day() -> str:
 
 def _prediction_exists(conn, date_str: str) -> bool:
     """Return True if a prediction row already exists for this date."""
-    # Check via articles join
     result = conn.execute(
-        text(
-            """
-            SELECT COUNT(*) FROM predictions p
-            JOIN articles a ON a.id = p.doc_id
-            WHERE a.date = :date
-            """
-        ),
+        text("SELECT COUNT(*) FROM predictions WHERE date = :date"),
         {"date": date_str},
     ).scalar()
     return (result or 0) > 0
@@ -167,26 +160,25 @@ def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
     return float(pred.values()[0, 0])
 
 
-def _store_prediction(conn, score: float, article_ids: list[int],
+def _store_prediction(conn, date_str: str, score: float,
                       model_version: str, is_pg: bool) -> None:
-    """Insert prediction rows linked to each article for the target date."""
-    for art_id in (article_ids or [None]):
-        if is_pg:
-            sql = text(
-                """
-                INSERT INTO predictions (doc_id, stress_score_pred, model_version)
-                VALUES (:doc_id, :score, :ver)
-                ON CONFLICT DO NOTHING
-                """
-            )
-        else:
-            sql = text(
-                """
-                INSERT OR IGNORE INTO predictions (doc_id, stress_score_pred, model_version)
-                VALUES (:doc_id, :score, :ver)
-                """
-            )
-        conn.execute(sql, {"doc_id": art_id, "score": score, "ver": model_version})
+    """Insert a prediction row for the target date."""
+    if is_pg:
+        sql = text(
+            """
+            INSERT INTO predictions (date, stress_score_pred, model_version)
+            VALUES (:date, :score, :ver)
+            ON CONFLICT (date, model_version) DO UPDATE SET stress_score_pred = EXCLUDED.stress_score_pred
+            """
+        )
+    else:
+        sql = text(
+            """
+            INSERT OR REPLACE INTO predictions (date, stress_score_pred, model_version)
+            VALUES (:date, :score, :ver)
+            """
+        )
+    conn.execute(sql, {"date": date_str, "score": score, "ver": model_version})
 
 
 def run_daily(target_date: str | None = None) -> dict:
@@ -245,7 +237,7 @@ def run_daily(target_date: str | None = None) -> dict:
     log.info("Stress score for %s: %.4f", target_date, stress_score)
 
     with engine.begin() as conn:
-        _store_prediction(conn, stress_score, target_article_ids, model_version, is_pg)
+        _store_prediction(conn, target_date, stress_score, model_version, is_pg)
 
     result = {
         "date": target_date,
