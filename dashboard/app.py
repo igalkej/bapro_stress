@@ -58,8 +58,12 @@ def load_artifacts():
 
     if _tide_model is None and os.path.exists(TIDE_MODEL_PATH):
         try:
+            import torch
+            _orig_load = torch.load
+            torch.load = lambda *a, **kw: _orig_load(*a, **{**kw, "weights_only": False})
             from darts.models import TiDEModel
             _tide_model = TiDEModel.load(TIDE_MODEL_PATH)
+            torch.load = _orig_load
         except Exception:
             pass
 
@@ -501,71 +505,30 @@ def score_new_document(n_clicks, text):
     if not text or not text.strip():
         return html.P("Please paste a document first.", style={"color": "#f78166"})
 
-    tide_model, _ = load_artifacts()
-    if tide_model is None:
-        return html.P(
-            "TiDE model not found. Run training/train.py first.",
-            style={"color": "#f78166"},
-        )
-
     try:
-        import json as _json
+        import pickle
         import numpy as _np
-        import pandas as _pd
-        from darts import TimeSeries as _TS
-        from sqlalchemy import text as _text
 
         # Encode new document
         st_model = get_st_model()
-        new_emb = st_model.encode([text], convert_to_numpy=True)[0].tolist()
+        emb = st_model.encode([text], convert_to_numpy=True)  # (1, 384)
 
-        # Load last input_chunk_length data points from DB for context
-        n_ctx = tide_model.input_chunk_length
-        engine = get_db_engine()
-        with engine.connect() as conn:
-            rows = conn.execute(
-                _text(
-                    """
-                    SELECT f.date, ae.embedding, f.fsi_value
-                    FROM fsi_target f
-                    JOIN articles a ON a.date = f.date
-                    JOIN article_embeddings ae ON ae.id = a.id
-                    ORDER BY f.date DESC
-                    LIMIT :n
-                    """
-                ),
-                {"n": n_ctx},
-            ).fetchall()
-        rows = list(reversed(rows))
+        # Load PCA + XGBoost from artifacts
+        pca_path = os.path.join(ARTIFACTS_DIR, "pca.pkl")
+        xgb_path = os.path.join(ARTIFACTS_DIR, "xgb_model.pkl")
+        if not os.path.exists(pca_path) or not os.path.exists(xgb_path):
+            return html.P(
+                "XGBoost model not found. Run training/train.py first.",
+                style={"color": "#f78166"},
+            )
 
-        dates = [_pd.Timestamp(str(r[0])[:10]) for r in rows]
-        stress_vals = [float(r[2]) for r in rows]
-        embeddings = [
-            _json.loads(r[1]) if isinstance(r[1], str) else list(r[1])
-            for r in rows
-        ]
+        with open(pca_path, "rb") as f:
+            pca = pickle.load(f)
+        with open(xgb_path, "rb") as f:
+            xgb = pickle.load(f)
 
-        # Append new doc embedding as covariate for prediction step
-        delta = dates[-1] - dates[-2] if len(dates) >= 2 else _pd.Timedelta(days=1)
-        next_date = dates[-1] + delta
-        all_dates = dates + [next_date]
-        all_embs = embeddings + [new_emb]
-
-        target_df = _pd.DataFrame(
-            {"stress_value": stress_vals}, index=_pd.DatetimeIndex(dates)
-        )
-        target_series = _TS.from_dataframe(target_df, freq=None)
-
-        dim = len(new_emb)
-        cov_df = _pd.DataFrame(
-            _np.array(all_embs, dtype=_np.float32),
-            index=_pd.DatetimeIndex(all_dates),
-            columns=[f"emb_{i}" for i in range(dim)],
-        )
-        cov_series = _TS.from_dataframe(cov_df, freq=None)
-
-        pred = tide_model.predict(n=1, series=target_series, past_covariates=cov_series)
-        score = float(pred.values()[0][0])
+        reduced = pca.transform(emb)   # (1, 19)
+        score = float(xgb.predict(reduced)[0])
     except Exception as exc:
         return html.P(f"Error: {exc}", style={"color": "#f78166"})
 
