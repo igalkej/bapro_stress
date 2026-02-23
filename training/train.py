@@ -151,6 +151,7 @@ def evaluate_split(model, target, covariates, start, name):
     preds = model.historical_forecasts(
         series=target,
         past_covariates=covariates,
+        future_covariates=covariates,
         start=start,
         forecast_horizon=OUTPUT_CHUNK,
         stride=1,
@@ -260,8 +261,10 @@ def main():
     model.fit(
         series=target_train,
         past_covariates=cov_full[:TRAIN_SIZE],
+        future_covariates=cov_full[:TRAIN_SIZE],
         val_series=target_val,
         val_past_covariates=cov_full,
+        val_future_covariates=cov_full,
         verbose=True,
     )
 
@@ -285,6 +288,7 @@ def main():
     full_preds = model.historical_forecasts(
         series=target,
         past_covariates=cov_full,
+        future_covariates=cov_full,
         start=INPUT_CHUNK,
         forecast_horizon=OUTPUT_CHUNK,
         stride=1,

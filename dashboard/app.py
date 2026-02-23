@@ -505,34 +505,126 @@ def score_new_document(n_clicks, text):
     if not text or not text.strip():
         return html.P("Please paste a document first.", style={"color": "#f78166"})
 
+    tide_model, metadata = load_artifacts()
+    if tide_model is None:
+        return html.P(
+            "TiDE model not found. Run training/train.py first.",
+            style={"color": "#f78166"},
+        )
+
     try:
-        import pickle
+        import json as _json
         import numpy as _np
+        import pandas as _pd
+        from collections import defaultdict
+        from darts import TimeSeries as _TS
+        from sqlalchemy import text as _text
 
-        # Encode new document
+        # Embed new article
         st_model = get_st_model()
-        emb = st_model.encode([text], convert_to_numpy=True)  # (1, 384)
+        new_emb = st_model.encode([text], convert_to_numpy=True)[0].astype(_np.float32)
+        dim = len(new_emb)
 
-        # Load PCA + XGBoost from artifacts
-        pca_path = os.path.join(ARTIFACTS_DIR, "pca.pkl")
-        xgb_path = os.path.join(ARTIFACTS_DIR, "xgb_model.pkl")
-        if not os.path.exists(pca_path) or not os.path.exists(xgb_path):
-            return html.P(
-                "XGBoost model not found. Run training/train.py first.",
-                style={"color": "#f78166"},
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            # Last 15 known FSI values (ascending order)
+            fsi_rows = list(reversed(conn.execute(
+                _text("SELECT date, fsi_value FROM fsi_target ORDER BY date DESC LIMIT 15")
+            ).fetchall()))
+            if not fsi_rows:
+                return html.P("No FSI data in DB.", style={"color": "#f78166"})
+
+            last_fsi_date = _pd.Timestamp(str(fsi_rows[-1][0])[:10])
+            fetch_start  = _pd.Timestamp(str(fsi_rows[0][0])[:10])
+
+            # Today = last business day
+            today = _pd.Timestamp.now().normalize()
+            if today.weekday() >= 5:
+                today = today - _pd.tseries.offsets.BDay(1)
+
+            # n = gap: business days from last_fsi_date (excl) to today (incl)
+            bridge_range = _pd.bdate_range(
+                last_fsi_date + _pd.tseries.offsets.BDay(1), today
             )
+            n = max(len(bridge_range), 1)
 
-        with open(pca_path, "rb") as f:
-            pca = pickle.load(f)
-        with open(xgb_path, "rb") as f:
-            xgb = pickle.load(f)
+            # Article embeddings covering FSI period + bridge days
+            emb_rows = conn.execute(
+                _text("""
+                    SELECT a.date, ae.embedding
+                    FROM articles a
+                    JOIN article_embeddings ae ON ae.id = a.id
+                    WHERE a.date >= :start
+                    ORDER BY a.date ASC
+                """),
+                {"start": fetch_start.strftime("%Y-%m-%d")},
+            ).fetchall()
 
-        reduced = pca.transform(emb)   # (1, 19)
-        score = float(xgb.predict(reduced)[0])
+        # Build FSI target series — ends at last_fsi_date, no gap padding
+        fsi_dates = [_pd.Timestamp(str(r[0])[:10]) for r in fsi_rows]
+        fsi_vals  = [float(r[1]) for r in fsi_rows]
+        fsi_df = _pd.DataFrame(
+            {"fsi_value": fsi_vals}, index=_pd.DatetimeIndex(fsi_dates)
+        )
+        target_series = _TS.from_dataframe(fsi_df, fill_missing_dates=True, freq="B")
+
+        # Collect embeddings by date from DB
+        date_embs = defaultdict(list)
+        for r in emb_rows:
+            d = _pd.Timestamp(str(r[0])[:10])
+            raw = r[1]
+            vec = _np.array(
+                _json.loads(raw) if isinstance(raw, str) else list(raw),
+                dtype=_np.float32,
+            )
+            date_embs[d].append(vec)
+
+        # Merge new article into today's embedding pool
+        date_embs[today].append(new_emb)
+
+        # Build covariate series covering FSI dates + bridge days + today + 1 extra
+        # (past_covariates must extend n+1 steps beyond target end for n > output_chunk_length)
+        cov_end = today + _pd.tseries.offsets.BDay(1)
+        all_cov_dates = sorted(
+            set(_pd.bdate_range(fetch_start, cov_end).tolist())
+        )
+        zero_vec = _np.zeros(dim, dtype=_np.float32)
+        cov_mat = _np.stack([
+            _np.mean(date_embs[d], axis=0) if date_embs[d] else zero_vec
+            for d in all_cov_dates
+        ])
+        cov_df = _pd.DataFrame(
+            cov_mat,
+            index=_pd.DatetimeIndex(all_cov_dates),
+            columns=[f"emb_{i}" for i in range(dim)],
+        )
+        cov_raw = _TS.from_dataframe(cov_df, fill_missing_dates=True, freq="B")
+        cov_series = _TS.from_dataframe(
+            cov_raw.to_dataframe().fillna(0.0), freq="B"
+        )
+
+        # Predict: n steps to reach today
+        pred = tide_model.predict(
+            n=n,
+            series=target_series,
+            past_covariates=cov_series,
+            future_covariates=cov_series,
+            num_samples=1,
+            show_warnings=False,
+        )
+        score = float(pred.values()[-1, 0])
+
+        # 95% CI from test RMSE (Gaussian approximation: score ± 1.96 * test_rmse)
+        test_rmse = (metadata or {}).get("test_rmse", 0.5)
+        lo = score - 1.96 * test_rmse
+        hi = score + 1.96 * test_rmse
+
     except Exception as exc:
         return html.P(f"Error: {exc}", style={"color": "#f78166"})
 
     # Gauge chart
+    # Thin CI markers on the arc (width = 1.4% of gauge range)
+    eps = 0.05
     gauge = go.Figure(
         go.Indicator(
             mode="gauge+number",
@@ -549,6 +641,8 @@ def score_new_document(n_clicks, text):
                     {"range": [-1, 1], "color": "#9e6a03"},
                     {"range": [1, 2.5], "color": "#bc4c00"},
                     {"range": [2.5, 4], "color": "#a40e26"},
+                    {"range": [lo - eps, lo + eps], "color": "#e6edf3"},
+                    {"range": [hi - eps, hi + eps], "color": "#e6edf3"},
                 ],
                 "threshold": {
                     "line": {"color": "#f78166", "width": 3},
@@ -563,6 +657,13 @@ def score_new_document(n_clicks, text):
         font_color="#e6edf3",
         height=300,
         margin={"t": 40, "b": 20, "l": 40, "r": 40},
+    )
+    gauge.add_annotation(
+        text=f"95% CI: [{lo:.2f} \u2014 {hi:.2f}]",
+        x=0.5, y=0.05,
+        showarrow=False,
+        font={"size": 12, "color": "#8b949e"},
+        xref="paper", yref="paper",
     )
 
     # Interpretation
@@ -587,7 +688,7 @@ def score_new_document(n_clicks, text):
                     "fontWeight": "bold",
                     "marginBottom": "16px",
                 },
-                children=f"{label} ({score:.3f})",
+                children=f"{label} ({score:.3f})  95% CI [{lo:.2f} \u2014 {hi:.2f}]",
             ),
             dcc.Graph(figure=gauge, style={"height": "300px"}),
         ]
