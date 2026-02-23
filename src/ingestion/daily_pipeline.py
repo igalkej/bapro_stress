@@ -214,9 +214,14 @@ def run_daily(target_date: str | None = None) -> dict:
     # Build prediction context
     model_path = TIDE_MODEL_PATH
     if not Path(model_path).exists():
-        msg = f"TiDE model not found at {model_path}. Run make train first."
-        log.error(msg)
-        raise RuntimeError(msg)
+        log.warning("TiDE model not found at %s. Skipping prediction.", model_path)
+        return {
+            "date": target_date,
+            "gdelt_new": gdelt_new,
+            "rss_new": rss_new,
+            "stress_score": None,
+            "status": "no_model",
+        }
 
     with engine.connect() as conn:
         from darts.models import TiDEModel
