@@ -84,15 +84,16 @@ def fetch_history():
             text(
                 """
                 SELECT
-                    a.date,
-                    a.headline       AS content,
-                    a.source         AS doc_type,
+                    p.date,
+                    MIN(a.headline)  AS content,
+                    MIN(a.source)    AS doc_type,
                     p.stress_score_pred,
                     f.fsi_value      AS stress_actual
                 FROM predictions p
-                JOIN articles a    ON a.id = p.doc_id
-                JOIN fsi_target f  ON f.date = a.date
-                ORDER BY a.date
+                LEFT JOIN articles a  ON a.date = p.date
+                JOIN fsi_target f     ON f.date = p.date
+                GROUP BY p.date, p.stress_score_pred, f.fsi_value
+                ORDER BY p.date
                 """
             )
         ).fetchall()
