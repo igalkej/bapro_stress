@@ -166,40 +166,60 @@ def evaluate_split(model, target, covariates, start, name):
 
 
 # ---------------------------------------------------------------------------
-# Predictions table writer — updated for articles table
+# training_predictions table writer
 # ---------------------------------------------------------------------------
 
-def write_predictions(engine, df, preds_series, model_version):
+def write_training_predictions(engine, df, preds_series, split, model_version):
     """
-    Write predictions to DB keyed by date.
+    Write out-of-sample predictions to training_predictions table.
+
+    split: 'val' or 'test'
+    df: full dataset DataFrame with 'date' and 'fsi_value' columns (for fsi_actual lookup)
     """
     is_pg = not engine.url.drivername.startswith("sqlite")
 
     preds_df = preds_series.to_dataframe().reset_index()
-    preds_df.columns = ["time", "stress_score_pred"]
+    preds_df.columns = ["time", "fsi_pred"]
     preds_df["time"] = pd.to_datetime(preds_df["time"])
-    preds_df = preds_df.dropna(subset=["stress_score_pred"])
+    preds_df = preds_df.dropna(subset=["fsi_pred"])
+
+    # Build date -> fsi_actual lookup
+    actual_lookup = {
+        row["date"].strftime("%Y-%m-%d"): float(row["fsi_value"])
+        for _, row in df.iterrows()
+    }
 
     with engine.begin() as conn:
         for _, row in preds_df.iterrows():
             date_str = row["time"].strftime("%Y-%m-%d")
-            pred_val = float(row["stress_score_pred"])
+            pred_val = float(row["fsi_pred"])
+            actual_val = actual_lookup.get(date_str)
             if is_pg:
                 sql = text(
                     """
-                    INSERT INTO predictions (date, stress_score_pred, model_version)
-                    VALUES (:date, :pred, :version)
-                    ON CONFLICT (date, model_version) DO UPDATE SET stress_score_pred = EXCLUDED.stress_score_pred
+                    INSERT INTO training_predictions (date, fsi_actual, fsi_pred, split, model_version)
+                    VALUES (:date, :actual, :pred, :split, :version)
+                    ON CONFLICT (date, split) DO UPDATE SET
+                        fsi_actual    = EXCLUDED.fsi_actual,
+                        fsi_pred      = EXCLUDED.fsi_pred,
+                        model_version = EXCLUDED.model_version
                     """
                 )
             else:
                 sql = text(
                     """
-                    INSERT OR REPLACE INTO predictions (date, stress_score_pred, model_version)
-                    VALUES (:date, :pred, :version)
+                    INSERT OR REPLACE INTO training_predictions
+                        (date, fsi_actual, fsi_pred, split, model_version)
+                    VALUES (:date, :actual, :pred, :split, :version)
                     """
                 )
-            conn.execute(sql, {"date": date_str, "pred": pred_val, "version": model_version})
+            conn.execute(sql, {
+                "date":    date_str,
+                "actual":  actual_val,
+                "pred":    pred_val,
+                "split":   split,
+                "version": model_version,
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -271,29 +291,16 @@ def main():
     model.save(TIDE_MODEL_PATH)
     print(f"Model saved: {TIDE_MODEL_PATH}")
 
-    # Evaluate splits
+    # Evaluate splits and capture out-of-sample predictions
     print("Evaluating splits...")
     train_mae_val, train_rmse_val, _ = evaluate_split(
         model, target_train, cov_full[:TRAIN_SIZE], INPUT_CHUNK, "Train"
     )
-    val_mae_val, val_rmse_val, _ = evaluate_split(
+    val_mae_val, val_rmse_val, val_preds = evaluate_split(
         model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE], TRAIN_SIZE, "Val"
     )
-    test_mae_val, test_rmse_val, _ = evaluate_split(
+    test_mae_val, test_rmse_val, test_preds = evaluate_split(
         model, target_test, cov_full, TRAIN_SIZE + VAL_SIZE, "Test"
-    )
-
-    # Full predictions for DB
-    print("Generating full-series predictions for DB...")
-    full_preds = model.historical_forecasts(
-        series=target,
-        past_covariates=cov_full,
-        future_covariates=cov_full,
-        start=INPUT_CHUNK,
-        forecast_horizon=OUTPUT_CHUNK,
-        stride=1,
-        retrain=False,
-        verbose=False,
     )
 
     model_version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -332,8 +339,9 @@ def main():
         json.dump(metadata, f, indent=2)
     print(f"Metadata saved: {meta_path}")
 
-    write_predictions(engine, df, full_preds, model_version)
-    print(f"Wrote {len(full_preds)} predictions to DB. Version: {model_version}")
+    write_training_predictions(engine, df, val_preds, "val", model_version)
+    write_training_predictions(engine, df, test_preds, "test", model_version)
+    print(f"Wrote {len(val_preds)} val + {len(test_preds)} test predictions to DB. Version: {model_version}")
 
 
 if __name__ == "__main__":

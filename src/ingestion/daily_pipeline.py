@@ -41,9 +41,9 @@ def _last_business_day() -> str:
 
 
 def _prediction_exists(conn, date_str: str) -> bool:
-    """Return True if a prediction row already exists for this date."""
+    """Return True if a daily prediction row already exists for this date."""
     result = conn.execute(
-        text("SELECT COUNT(*) FROM predictions WHERE date = :date"),
+        text("SELECT COUNT(*) FROM daily_predictions WHERE date = :date"),
         {"date": date_str},
     ).scalar()
     return (result or 0) > 0
@@ -162,19 +162,22 @@ def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
 
 def _store_prediction(conn, date_str: str, score: float,
                       model_version: str, is_pg: bool) -> None:
-    """Insert a prediction row for the target date."""
+    """Insert a daily prediction row for the target date."""
     if is_pg:
         sql = text(
             """
-            INSERT INTO predictions (date, stress_score_pred, model_version)
+            INSERT INTO daily_predictions (date, fsi_pred, model_version)
             VALUES (:date, :score, :ver)
-            ON CONFLICT (date, model_version) DO UPDATE SET stress_score_pred = EXCLUDED.stress_score_pred
+            ON CONFLICT (date) DO UPDATE SET
+                fsi_pred      = EXCLUDED.fsi_pred,
+                model_version = EXCLUDED.model_version,
+                predicted_at  = NOW()
             """
         )
     else:
         sql = text(
             """
-            INSERT OR REPLACE INTO predictions (date, stress_score_pred, model_version)
+            INSERT OR REPLACE INTO daily_predictions (date, fsi_pred, model_version)
             VALUES (:date, :score, :ver)
             """
         )
