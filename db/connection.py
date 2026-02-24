@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS daily_predictions (
     model_version TEXT,
     predicted_at  TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS optuna_trials (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    study_name    TEXT    NOT NULL,
+    trial_number  INTEGER NOT NULL,
+    rank_val      INTEGER NOT NULL,
+    mape_val      REAL    NOT NULL,
+    mape_test     REAL,
+    mae_test      REAL,
+    rmse_test     REAL,
+    is_production INTEGER DEFAULT 0,
+    hyperparams   TEXT    NOT NULL,
+    model_version TEXT,
+    created_at    TEXT    DEFAULT (datetime('now'))
+);
 """
 
 

@@ -76,3 +76,18 @@ CREATE TABLE IF NOT EXISTS daily_predictions (
     model_version VARCHAR(255),
     predicted_at  TIMESTAMP    DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS optuna_trials (
+    id            SERIAL PRIMARY KEY,
+    study_name    VARCHAR(255) NOT NULL,
+    trial_number  INT          NOT NULL,
+    rank_val      INT          NOT NULL,
+    mape_val      FLOAT        NOT NULL,
+    mape_test     FLOAT,
+    mae_test      FLOAT,
+    rmse_test     FLOAT,
+    is_production BOOLEAN      DEFAULT FALSE,
+    hyperparams   TEXT         NOT NULL,
+    model_version VARCHAR(255),
+    created_at    TIMESTAMP    DEFAULT NOW()
+);
