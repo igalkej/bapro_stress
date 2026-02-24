@@ -147,13 +147,13 @@ app.layout = html.Div(
             style={"backgroundColor": "#161b22"},
             children=[
                 dcc.Tab(
-                    label="Historical Results",
+                    label="Entrenamiento",
                     value="tab-history",
                     style={"color": "#8b949e", "backgroundColor": "#161b22"},
                     selected_style={"color": "#e6edf3", "backgroundColor": "#0d1117", "borderTop": "2px solid #388bfd"},
                 ),
                 dcc.Tab(
-                    label="New Prediction",
+                    label="Predicciones",
                     value="tab-predict",
                     style={"color": "#8b949e", "backgroundColor": "#161b22"},
                     selected_style={"color": "#e6edf3", "backgroundColor": "#0d1117", "borderTop": "2px solid #388bfd"},
