@@ -54,6 +54,31 @@ CREATE TABLE IF NOT EXISTS fsi_target (
     date      TEXT NOT NULL UNIQUE,
     fsi_value REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS fsi_components (
+    date        TEXT NOT NULL UNIQUE,
+    merv_vol    REAL,
+    argt_spread REAL,
+    usd_ars     REAL,
+    emb_spread  REAL
+);
+
+CREATE TABLE IF NOT EXISTS training_predictions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    date          TEXT NOT NULL,
+    fsi_actual    REAL,
+    fsi_pred      REAL NOT NULL,
+    split         TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    UNIQUE (date, split)
+);
+
+CREATE TABLE IF NOT EXISTS daily_predictions (
+    date          TEXT NOT NULL UNIQUE,
+    fsi_pred      REAL NOT NULL,
+    model_version TEXT,
+    predicted_at  TEXT DEFAULT (datetime('now'))
+);
 """
 
 

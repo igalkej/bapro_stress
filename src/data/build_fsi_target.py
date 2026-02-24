@@ -28,6 +28,8 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from config import FSI_CSV
+from db.connection import get_engine
+from sqlalchemy import text as _sa_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -55,6 +57,45 @@ def _zscore(series: pd.Series) -> pd.Series:
     if clean.std() == 0:
         return series * 0
     return (series - clean.mean()) / clean.std()
+
+
+def _save_components_to_db(components_df: pd.DataFrame) -> None:
+    """Persist normalised FSI components to the fsi_components table."""
+    try:
+        engine = get_engine()
+        is_pg = not engine.url.drivername.startswith("sqlite")
+        with engine.begin() as conn:
+            for _, row in components_df.iterrows():
+                if is_pg:
+                    sql = _sa_text(
+                        """
+                        INSERT INTO fsi_components (date, merv_vol, argt_spread, usd_ars, emb_spread)
+                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread)
+                        ON CONFLICT (date) DO UPDATE SET
+                            merv_vol    = EXCLUDED.merv_vol,
+                            argt_spread = EXCLUDED.argt_spread,
+                            usd_ars     = EXCLUDED.usd_ars,
+                            emb_spread  = EXCLUDED.emb_spread
+                        """
+                    )
+                else:
+                    sql = _sa_text(
+                        """
+                        INSERT OR REPLACE INTO fsi_components
+                            (date, merv_vol, argt_spread, usd_ars, emb_spread)
+                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread)
+                        """
+                    )
+                conn.execute(sql, {
+                    "date":        row["date"],
+                    "merv_vol":    float(row["merv_vol"]),
+                    "argt_spread": float(row["argt_spread"]),
+                    "usd_ars":     float(row["usd_ars"]),
+                    "emb_spread":  float(row["emb_spread"]),
+                })
+        log.info("Saved %d rows to fsi_components", len(components_df))
+    except Exception as exc:
+        log.warning("Could not save components to DB: %s", exc)
 
 
 def build_fsi(start: str, end: str) -> pd.DataFrame:
@@ -110,6 +151,17 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
     # --- Z-score normalise ---
     scaler = StandardScaler()
     X = scaler.fit_transform(df)
+
+    # --- Save normalised components to DB ---
+    components_df = pd.DataFrame(
+        X,
+        index=df.index,
+        columns=["merv_vol", "argt_spread", "usd_ars", "emb_spread"],
+    )
+    components_df.index.name = "date"
+    components_df = components_df.reset_index()
+    components_df["date"] = components_df["date"].dt.strftime("%Y-%m-%d")
+    _save_components_to_db(components_df)
 
     # --- PCA: first component = FSI ---
     pca = PCA(n_components=1)
