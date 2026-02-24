@@ -182,6 +182,24 @@ def fetch_fsi_components():
     return df
 
 
+def fetch_daily_predictions():
+    """Load daily predictions and full FSI series for the Predicciones tab."""
+    engine = get_db_engine()
+    with engine.connect() as conn:
+        fsi_rows = conn.execute(
+            text("SELECT date, fsi_value FROM fsi_target ORDER BY date")
+        ).fetchall()
+        pred_rows = conn.execute(
+            text("SELECT date, fsi_pred, model_version FROM daily_predictions ORDER BY date")
+        ).fetchall()
+    fsi_list = [{"date": str(r[0])[:10], "fsi_value": float(r[1])} for r in fsi_rows]
+    pred_list = [
+        {"date": str(r[0])[:10], "fsi_pred": float(r[1]), "model_version": str(r[2] or "")}
+        for r in pred_rows
+    ]
+    return {"fsi": fsi_list, "daily_preds": pred_list}
+
+
 def fetch_optuna_results():
     """Return Optuna trial results from optuna_trials table. None if unavailable."""
     try:
@@ -369,43 +387,49 @@ def _history_layout():
 
 
 def _predict_layout():
-    return html.Div(
-        children=[
-            html.H4("Paste a new financial document to score", style={"color": "#e6edf3", "marginTop": 0}),
-            dcc.Textarea(
-                id="new-doc-text",
-                placeholder="Paste the document text here…",
-                style={
-                    "width": "100%",
-                    "height": "280px",
-                    "backgroundColor": "#161b22",
-                    "color": "#e6edf3",
-                    "border": "1px solid #30363d",
-                    "borderRadius": "6px",
-                    "padding": "12px",
-                    "fontSize": "13px",
-                    "resize": "vertical",
-                    "boxSizing": "border-box",
-                },
-            ),
-            html.Button(
-                "Score Document",
-                id="score-btn",
-                n_clicks=0,
-                style={
-                    "marginTop": "12px",
-                    "padding": "10px 24px",
-                    "backgroundColor": "#388bfd",
-                    "color": "white",
-                    "border": "none",
-                    "borderRadius": "6px",
-                    "cursor": "pointer",
-                    "fontSize": "14px",
-                },
-            ),
-            html.Div(id="predict-output", style={"marginTop": "24px"}),
-        ]
-    )
+    return html.Div(children=[
+        # --- FSI history chart with range selector ---
+        dcc.Graph(id="fsi-history-chart", style={"height": "380px"}),
+
+        # --- Score section (DASH-04 will replace the textarea below) ---
+        html.Div(id="predict-output", style={"marginTop": "24px"}),
+
+        # --- Legacy: textbox + button (removed in DASH-04) ---
+        html.H4("Score manual (temporal)", style={"color": "#8b949e", "marginTop": "24px",
+                                                   "fontSize": "13px"}),
+        dcc.Textarea(
+            id="new-doc-text",
+            placeholder="Paste the document text here…",
+            style={
+                "width": "100%",
+                "height": "200px",
+                "backgroundColor": "#161b22",
+                "color": "#e6edf3",
+                "border": "1px solid #30363d",
+                "borderRadius": "6px",
+                "padding": "12px",
+                "fontSize": "13px",
+                "resize": "vertical",
+                "boxSizing": "border-box",
+            },
+        ),
+        html.Button(
+            "Score Document",
+            id="score-btn",
+            n_clicks=0,
+            style={
+                "marginTop": "12px",
+                "padding": "10px 24px",
+                "backgroundColor": "#388bfd",
+                "color": "white",
+                "border": "none",
+                "borderRadius": "6px",
+                "cursor": "pointer",
+                "fontSize": "14px",
+            },
+        ),
+        html.Div(id="score-output-legacy", style={"marginTop": "24px"}),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -1032,7 +1056,76 @@ def render_eda_content(tab):
 # ---------------------------------------------------------------------------
 
 @app.callback(
-    Output("predict-output", "children"),
+    Output("fsi-history-chart", "figure"),
+    Input("tabs", "value"),
+)
+def render_fsi_history_chart(tab):
+    if tab != "tab-predict":
+        return go.Figure()
+
+    data = fetch_daily_predictions()
+    fsi_df = pd.DataFrame(data["fsi"])
+    daily_df = pd.DataFrame(data["daily_preds"])
+
+    if fsi_df.empty:
+        return _empty_fig("Sin datos FSI — ejecutar build_fsi_target.py y seed_fsi.py")
+
+    fsi_df["date"] = pd.to_datetime(fsi_df["date"])
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=fsi_df["date"], y=fsi_df["fsi_value"],
+        name="FSI Real",
+        line={"color": "#388bfd", "width": 2},
+        mode="lines",
+        fill="tozeroy",
+        fillcolor="rgba(56,139,253,0.07)",
+    ))
+
+    if not daily_df.empty:
+        daily_df["date"] = pd.to_datetime(daily_df["date"])
+        fig.add_trace(go.Scatter(
+            x=daily_df["date"], y=daily_df["fsi_pred"],
+            name="Pred. diaria",
+            mode="markers",
+            marker={"color": "#f0b429", "size": 7, "symbol": "circle",
+                    "line": {"color": "#e6edf3", "width": 1}},
+            hovertemplate="Fecha: %{x|%Y-%m-%d}<br>FSI pred: %{y:.3f}",
+        ))
+
+    fig.update_layout(
+        paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
+        font_color="#e6edf3",
+        legend={"font": {"color": "#e6edf3"}, "bgcolor": "#0d1117",
+                "bordercolor": "#30363d", "borderwidth": 1},
+        margin={"t": 20, "b": 40, "l": 60, "r": 20},
+        hovermode="x unified",
+        xaxis=dict(
+            gridcolor="#21262d",
+            title="Fecha",
+            rangeselector=dict(
+                bgcolor="#161b22",
+                activecolor="#388bfd",
+                font={"color": "#e6edf3", "size": 11},
+                buttons=[
+                    dict(count=1,  label="1D", step="day",  stepmode="backward"),
+                    dict(count=7,  label="1S", step="day",  stepmode="backward"),
+                    dict(count=1,  label="1M", step="month", stepmode="backward"),
+                    dict(count=1,  label="1A", step="year",  stepmode="backward"),
+                    dict(count=5,  label="5A", step="year",  stepmode="backward"),
+                    dict(step="all", label="MAX"),
+                ],
+            ),
+            rangeslider=dict(visible=False),
+            type="date",
+        ),
+        yaxis={"gridcolor": "#21262d", "title": "FSI"},
+    )
+    return fig
+
+
+@app.callback(
+    Output("score-output-legacy", "children"),
     Input("score-btn", "n_clicks"),
     State("new-doc-text", "value"),
     prevent_initial_call=True,
