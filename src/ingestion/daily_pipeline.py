@@ -120,16 +120,29 @@ def _get_context_for_prediction(conn, target_date: str, input_chunk: int,
     return fsi_df, target_article_ids
 
 
+def _load_tide_model(model_path: str):
+    """Load TiDE model with weights_only=False patch for PyTorch 2.6+."""
+    import torch
+    from darts.models import TiDEModel
+    _orig = torch.load
+    torch.load = lambda *a, **kw: _orig(*a, **{**kw, "weights_only": False})
+    try:
+        model = TiDEModel.load(model_path)
+    finally:
+        torch.load = _orig
+    return model
+
+
 def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
     """Load TiDE model and predict one step ahead. Returns stress score."""
     from darts import TimeSeries
-    from darts.models import TiDEModel
 
-    model = TiDEModel.load(model_path)
+    model = _load_tide_model(model_path)
     input_chunk = model.input_chunk_length
 
     # Use last input_chunk rows
     ctx = context_df.tail(input_chunk).reset_index(drop=True)
+    ctx["date"] = pd.to_datetime(ctx["date"].astype(str).str[:10])
 
     fsi_series = TimeSeries.from_dataframe(
         ctx[["date", "fsi_value"]].rename(columns={"fsi_value": "value"}),
@@ -147,6 +160,18 @@ def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
         columns=[f"emb_{i}" for i in range(emb_dim)],
     )
     emb_df["date"] = ctx["date"].values
+
+    # Extend covariates by 1 extra business day (zero vector) so that
+    # future_covariates cover the output chunk when the model requires them.
+    last_date = pd.Timestamp(ctx["date"].iloc[-1])
+    next_bday = last_date + pd.offsets.BusinessDay(1)
+    extra_row = pd.DataFrame(
+        [np.zeros(emb_dim, dtype=np.float32)],
+        columns=[f"emb_{i}" for i in range(emb_dim)],
+    )
+    extra_row["date"] = next_bday
+    emb_df = pd.concat([emb_df, extra_row], ignore_index=True)
+
     cov_series = TimeSeries.from_dataframe(
         emb_df,
         time_col="date",
@@ -156,7 +181,12 @@ def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
         fillna_value=0.0,
     )
 
-    pred = model.predict(n=1, series=fsi_series, past_covariates=cov_series)
+    pred = model.predict(
+        n=1,
+        series=fsi_series,
+        past_covariates=cov_series,
+        future_covariates=cov_series,
+    )
     return float(pred.values()[0, 0])
 
 
@@ -210,9 +240,17 @@ def run_daily(target_date: str | None = None) -> dict:
     rss_new = fetch_and_store_rss(target_date, target_date)
 
     if gdelt_new + rss_new == 0:
-        msg = f"No new articles ingested for {target_date}"
-        log.error(msg)
-        raise RuntimeError(msg)
+        # No new articles — check if articles were already ingested on a prior run
+        with engine.connect() as conn:
+            existing = conn.execute(
+                text("SELECT COUNT(*) FROM articles WHERE date = :date"),
+                {"date": target_date},
+            ).scalar() or 0
+        if existing == 0:
+            msg = f"No articles found for {target_date}"
+            log.error(msg)
+            raise RuntimeError(msg)
+        log.info("No new articles (all already ingested). Proceeding with %d existing.", existing)
 
     # Build prediction context
     model_path = TIDE_MODEL_PATH
@@ -227,8 +265,7 @@ def run_daily(target_date: str | None = None) -> dict:
         }
 
     with engine.connect() as conn:
-        from darts.models import TiDEModel
-        model = TiDEModel.load(model_path)
+        model = _load_tide_model(model_path)
         input_chunk = model.input_chunk_length
         model_version = Path(model_path).stem
 
