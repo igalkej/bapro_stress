@@ -170,6 +170,12 @@ def _build_model(params: dict, work_dir: str, model_name: str,
 # ---------------------------------------------------------------------------
 
 def _historical_forecasts(model, target, covariates, start):
+    """
+    Rolling-window backtesting with last_points_only=False so that every
+    window contributes FORECAST_HORIZON prediction points.  Windows whose
+    horizon would extend beyond the end of `target` are excluded by Darts
+    (overlap_end=False default), which handles the boundary-truncation case.
+    """
     return model.historical_forecasts(
         series=target,
         past_covariates=covariates,
@@ -178,16 +184,32 @@ def _historical_forecasts(model, target, covariates, start):
         forecast_horizon=FORECAST_HORIZON,
         stride=1,
         retrain=False,
+        last_points_only=False,
         verbose=False,
     )
 
 
 def _eval_metrics(target, preds):
-    actual = target.slice_intersect(preds)
+    """
+    Compute metrics across the list of per-window forecasts returned by
+    _historical_forecasts (last_points_only=False).  Average MAPE/MAE/RMSE
+    over all windows that have at least one matching actual value.
+    """
+    mape_vals, mae_vals, rmse_vals = [], [], []
+    for p in preds:
+        actual = target.slice_intersect(p)
+        if len(actual) == 0:
+            continue
+        try:
+            mape_vals.append(float(darts_mape(actual, p)))
+            mae_vals.append(float(mae(actual, p)))
+            rmse_vals.append(float(rmse(actual, p)))
+        except Exception:
+            continue
     return {
-        "mape": float(darts_mape(actual, preds)),
-        "mae":  float(mae(actual, preds)),
-        "rmse": float(rmse(actual, preds)),
+        "mape": float(np.mean(mape_vals)) if mape_vals else float("nan"),
+        "mae":  float(np.mean(mae_vals))  if mae_vals  else float("nan"),
+        "rmse": float(np.mean(rmse_vals)) if rmse_vals else float("nan"),
     }
 
 
@@ -205,41 +227,54 @@ def _copy_loss_csv(work_dir: str, dest_dir: str) -> None:
 # training_predictions table writer
 # ---------------------------------------------------------------------------
 
-def write_training_predictions(engine, df, preds_series, split, model_version):
+def write_training_predictions(engine, df, preds_list, split, model_version):
+    """
+    Write per-window forecast results to training_predictions.
+
+    preds_list is a list[TimeSeries] (one per rolling window).  Windows are
+    iterated in order so the UPSERT leaves the 1-step-ahead prediction for
+    each date (the last window to cover a date is its 1-step-ahead forecast).
+    """
     is_pg = not engine.url.drivername.startswith("sqlite")
-    preds_df = preds_series.to_dataframe().reset_index()
-    preds_df.columns = ["time", "fsi_pred"]
-    preds_df["time"] = pd.to_datetime(preds_df["time"])
-    preds_df = preds_df.dropna(subset=["fsi_pred"])
 
     actual_lookup = {
         row["date"].strftime("%Y-%m-%d"): float(row["fsi_value"])
         for _, row in df.iterrows()
     }
 
+    if is_pg:
+        upsert_sql = text(
+            "INSERT INTO training_predictions "
+            "(date, fsi_actual, fsi_pred, split, model_version) "
+            "VALUES (:date, :actual, :pred, :split, :version) "
+            "ON CONFLICT (date, split) DO UPDATE SET "
+            "fsi_actual=EXCLUDED.fsi_actual, fsi_pred=EXCLUDED.fsi_pred, "
+            "model_version=EXCLUDED.model_version"
+        )
+    else:
+        upsert_sql = text(
+            "INSERT OR REPLACE INTO training_predictions "
+            "(date, fsi_actual, fsi_pred, split, model_version) "
+            "VALUES (:date, :actual, :pred, :split, :version)"
+        )
+
     with engine.begin() as conn:
-        for _, row in preds_df.iterrows():
-            date_str   = row["time"].strftime("%Y-%m-%d")
-            pred_val   = float(row["fsi_pred"])
-            actual_val = actual_lookup.get(date_str)
-            if is_pg:
-                sql = text(
-                    "INSERT INTO training_predictions "
-                    "(date, fsi_actual, fsi_pred, split, model_version) "
-                    "VALUES (:date, :actual, :pred, :split, :version) "
-                    "ON CONFLICT (date, split) DO UPDATE SET "
-                    "fsi_actual=EXCLUDED.fsi_actual, fsi_pred=EXCLUDED.fsi_pred, "
-                    "model_version=EXCLUDED.model_version"
-                )
-            else:
-                sql = text(
-                    "INSERT OR REPLACE INTO training_predictions "
-                    "(date, fsi_actual, fsi_pred, split, model_version) "
-                    "VALUES (:date, :actual, :pred, :split, :version)"
-                )
-            conn.execute(sql, {"date": date_str, "actual": actual_val,
-                               "pred": pred_val, "split": split,
-                               "version": model_version})
+        for window_ts in preds_list:
+            window_df = window_ts.to_dataframe().reset_index()
+            window_df.columns = ["time", "fsi_pred"]
+            window_df["time"] = pd.to_datetime(window_df["time"])
+            window_df = window_df.dropna(subset=["fsi_pred"])
+            for _, row in window_df.iterrows():
+                date_str   = row["time"].strftime("%Y-%m-%d")
+                pred_val   = float(row["fsi_pred"])
+                actual_val = actual_lookup.get(date_str)
+                conn.execute(upsert_sql, {
+                    "date":    date_str,
+                    "actual":  actual_val,
+                    "pred":    pred_val,
+                    "split":   split,
+                    "version": model_version,
+                })
 
 
 # ---------------------------------------------------------------------------
