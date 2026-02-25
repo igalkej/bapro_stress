@@ -325,6 +325,9 @@ def main():
         # Guard: input_chunk must leave room for historical_forecasts on TRAIN
         if TRAIN_SIZE <= input_chunk + 1:
             raise optuna.TrialPruned()
+        # Guard: after lag offset, at least 1 step must remain in VAL and TEST
+        if input_chunk >= VAL_SIZE or input_chunk >= TEST_SIZE:
+            raise optuna.TrialPruned()
 
         params = {
             "input_chunk_length": input_chunk,
