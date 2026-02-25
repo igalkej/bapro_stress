@@ -28,6 +28,7 @@ from db.connection import get_engine
 from config import (
     ARTIFACTS_DIR, TIDE_MODEL_PATH,
     OPTUNA_N_TRIALS, OPTUNA_TOP_K, OPTUNA_DB_URL,
+    FORECAST_HORIZON,
 )
 
 from darts import TimeSeries
@@ -40,6 +41,7 @@ from darts.metrics import mae, rmse, mape as darts_mape
 TRAIN_PCT = 0.70
 VAL_PCT   = 0.15
 
+INPUT_CHUNK  = 2
 OUTPUT_CHUNK = 1
 STUDY_NAME   = "tide_bapro"
 
@@ -173,7 +175,7 @@ def _historical_forecasts(model, target, covariates, start):
         past_covariates=covariates,
         future_covariates=covariates,
         start=start,
-        forecast_horizon=OUTPUT_CHUNK,
+        forecast_horizon=FORECAST_HORIZON,
         stride=1,
         retrain=False,
         verbose=False,
@@ -319,18 +321,8 @@ def main():
 
     # ── Optuna study ─────────────────────────────────────────────────────────
     def objective(trial):
-        input_chunk = trial.suggest_categorical(
-            "input_chunk_length", [2, 5, min(10, TRAIN_SIZE - 2)]
-        )
-        # Guard: input_chunk must leave room for historical_forecasts on TRAIN
-        if TRAIN_SIZE <= input_chunk + 1:
-            raise optuna.TrialPruned()
-        # Guard: after lag offset, at least 1 step must remain in VAL and TEST
-        if input_chunk >= VAL_SIZE or input_chunk >= TEST_SIZE:
-            raise optuna.TrialPruned()
-
         params = {
-            "input_chunk_length": input_chunk,
+            "input_chunk_length": INPUT_CHUNK,
             "hidden_size":        trial.suggest_categorical("hidden_size", [32, 64, 128]),
             "num_encoder_layers": trial.suggest_int("num_encoder_layers", 1, 2),
             "num_decoder_layers": trial.suggest_int("num_decoder_layers", 1, 2),

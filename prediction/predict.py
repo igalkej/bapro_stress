@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from config import TIDE_MODEL_PATH
+from config import TIDE_MODEL_PATH, FORECAST_HORIZON
 from db.connection import get_engine
 
 
@@ -118,15 +118,15 @@ def run_predict(target_date: str) -> float:
     emb_df = pd.DataFrame(emb_array, columns=[f"emb_{i}" for i in range(emb_dim)])
     emb_df["date"] = ctx["date"].values
 
-    # Extend by 1 extra business day (zero vector) for future_covariates
+    # Extend by FORECAST_HORIZON extra business days (zero vectors) for future_covariates
     last_date = pd.Timestamp(ctx["date"].iloc[-1])
-    next_bday = last_date + pd.offsets.BusinessDay(1)
-    extra = pd.DataFrame(
-        [np.zeros(emb_dim, dtype=np.float32)],
-        columns=[f"emb_{i}" for i in range(emb_dim)],
-    )
-    extra["date"] = next_bday
-    emb_df = pd.concat([emb_df, extra], ignore_index=True)
+    extra_rows = []
+    for i in range(1, FORECAST_HORIZON + 1):
+        extra_rows.append({
+            **{f"emb_{j}": 0.0 for j in range(emb_dim)},
+            "date": last_date + pd.offsets.BusinessDay(i),
+        })
+    emb_df = pd.concat([emb_df, pd.DataFrame(extra_rows)], ignore_index=True)
 
     cov_series = TimeSeries.from_dataframe(
         emb_df,
@@ -138,12 +138,19 @@ def run_predict(target_date: str) -> float:
     )
 
     pred = model.predict(
-        n=1,
+        n=FORECAST_HORIZON,
         series=fsi_series,
         past_covariates=cov_series,
         future_covariates=cov_series,
     )
-    return float(pred.values()[0, 0])
+    pred_dates = pd.bdate_range(
+        start=pd.Timestamp(ctx["date"].iloc[-1]) + pd.offsets.BusinessDay(1),
+        periods=FORECAST_HORIZON,
+    )
+    return [
+        (d.strftime("%Y-%m-%d"), float(pred.values()[i, 0]))
+        for i, d in enumerate(pred_dates)
+    ]
 
 
 def main():
@@ -155,18 +162,18 @@ def main():
     )
     args = parser.parse_args()
 
-    score = run_predict(args.date)
-    print(f"FSI stress score for {args.date}: {score:.4f}")
-
-    if score >= 2.5:
-        label = "ALTO ESTRES"
-    elif score >= 1.0:
-        label = "ESTRES ELEVADO"
-    elif score >= -1.0:
-        label = "NEUTRAL"
-    else:
-        label = "CALMA"
-    print(f"Nivel: {label}")
+    predictions = run_predict(args.date)
+    print(f"Forecast from context date {args.date} ({FORECAST_HORIZON}-day horizon):")
+    for date_str, score in predictions:
+        if score >= 2.5:
+            label = "ALTO ESTRES"
+        elif score >= 1.0:
+            label = "ESTRES ELEVADO"
+        elif score >= -1.0:
+            label = "NEUTRAL"
+        else:
+            label = "CALMA"
+        print(f"  {date_str}: {score:.4f}  [{label}]")
 
 
 if __name__ == "__main__":
