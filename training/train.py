@@ -27,7 +27,7 @@ from sqlalchemy import text
 from db.connection import get_engine
 from config import (
     ARTIFACTS_DIR, TIDE_MODEL_PATH,
-    OPTUNA_N_TRIALS, OPTUNA_TOP_K, OPTUNA_DB_URL,
+    OPTUNA_N_TRIALS, OPTUNA_TOP_K,
     FORECAST_HORIZON,
 )
 
@@ -213,27 +213,18 @@ def _eval_metrics(target, preds):
     }
 
 
-def _copy_loss_csv(work_dir: str, dest_dir: str) -> None:
-    """Copy CSVLogger metrics.csv to dest_dir for dashboard display."""
-    import shutil
-    src = Path(work_dir) / "logs" / "metrics.csv"
-    if src.exists():
-        dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src, dest / "metrics.csv")
-
-
 # ---------------------------------------------------------------------------
 # training_predictions table writer
 # ---------------------------------------------------------------------------
 
 def write_training_predictions(engine, df, preds_list, split, model_version):
     """
-    Write per-window forecast results to training_predictions.
+    Write per-window forecast results to training_predictions, preserving
+    every horizon step (1..FORECAST_HORIZON) for each rolling window.
 
-    preds_list is a list[TimeSeries] (one per rolling window).  Windows are
-    iterated in order so the UPSERT leaves the 1-step-ahead prediction for
-    each date (the last window to cover a date is its 1-step-ahead forecast).
+    preds_list is a list[TimeSeries] (one per rolling window).  Each window's
+    TimeSeries contains up to FORECAST_HORIZON time steps, stored with their
+    horizon index so all predictions are visible in the dashboard fan chart.
     """
     is_pg = not engine.url.drivername.startswith("sqlite")
 
@@ -245,17 +236,17 @@ def write_training_predictions(engine, df, preds_list, split, model_version):
     if is_pg:
         upsert_sql = text(
             "INSERT INTO training_predictions "
-            "(date, fsi_actual, fsi_pred, split, model_version) "
-            "VALUES (:date, :actual, :pred, :split, :version) "
-            "ON CONFLICT (date, split) DO UPDATE SET "
+            "(date, fsi_actual, fsi_pred, split, horizon, model_version) "
+            "VALUES (:date, :actual, :pred, :split, :horizon, :version) "
+            "ON CONFLICT (date, split, horizon) DO UPDATE SET "
             "fsi_actual=EXCLUDED.fsi_actual, fsi_pred=EXCLUDED.fsi_pred, "
             "model_version=EXCLUDED.model_version"
         )
     else:
         upsert_sql = text(
             "INSERT OR REPLACE INTO training_predictions "
-            "(date, fsi_actual, fsi_pred, split, model_version) "
-            "VALUES (:date, :actual, :pred, :split, :version)"
+            "(date, fsi_actual, fsi_pred, split, horizon, model_version) "
+            "VALUES (:date, :actual, :pred, :split, :horizon, :version)"
         )
 
     with engine.begin() as conn:
@@ -264,7 +255,7 @@ def write_training_predictions(engine, df, preds_list, split, model_version):
             window_df.columns = ["time", "fsi_pred"]
             window_df["time"] = pd.to_datetime(window_df["time"])
             window_df = window_df.dropna(subset=["fsi_pred"])
-            for _, row in window_df.iterrows():
+            for horizon_step, (_, row) in enumerate(window_df.iterrows(), start=1):
                 date_str   = row["time"].strftime("%Y-%m-%d")
                 pred_val   = float(row["fsi_pred"])
                 actual_val = actual_lookup.get(date_str)
@@ -273,6 +264,7 @@ def write_training_predictions(engine, df, preds_list, split, model_version):
                     "actual":  actual_val,
                     "pred":    pred_val,
                     "split":   split,
+                    "horizon": horizon_step,
                     "version": model_version,
                 })
 
@@ -283,25 +275,16 @@ def write_training_predictions(engine, df, preds_list, split, model_version):
 
 def write_optuna_trials(engine, study_name, trial_results, model_version):
     is_pg = not engine.url.drivername.startswith("sqlite")
+    sql = text(
+        "INSERT INTO optuna_trials "
+        "(study_name, trial_number, rank_val, mape_val, mape_test, "
+        " mae_test, rmse_test, is_production, hyperparams, model_version) "
+        "VALUES (:study, :tnum, :rank, :mval, :mtest, "
+        " :maet, :rmset, :isprod, :hp, :ver)"
+    )
     with engine.begin() as conn:
         for res in trial_results:
             hp_json = json.dumps(res["params"])
-            if is_pg:
-                sql = text(
-                    "INSERT INTO optuna_trials "
-                    "(study_name, trial_number, rank_val, mape_val, mape_test, "
-                    " mae_test, rmse_test, is_production, hyperparams, model_version) "
-                    "VALUES (:study, :tnum, :rank, :mval, :mtest, "
-                    " :maet, :rmset, :isprod, :hp, :ver)"
-                )
-            else:
-                sql = text(
-                    "INSERT INTO optuna_trials "
-                    "(study_name, trial_number, rank_val, mape_val, mape_test, "
-                    " mae_test, rmse_test, is_production, hyperparams, model_version) "
-                    "VALUES (:study, :tnum, :rank, :mval, :mtest, "
-                    " :maet, :rmset, :isprod, :hp, :ver)"
-                )
             conn.execute(sql, {
                 "study":  study_name,
                 "tnum":   res["trial_number"],
@@ -314,6 +297,157 @@ def write_optuna_trials(engine, study_name, trial_results, model_version):
                 "hp":     hp_json,
                 "ver":    model_version,
             })
+
+
+# ---------------------------------------------------------------------------
+# models table writer
+# ---------------------------------------------------------------------------
+
+def write_models(engine, eval_results, model_version,
+                 train_size, val_size, test_size):
+    """
+    Persist each finalist model to the models table.
+
+    eval_results is the list of top-K finalist dicts.  The one marked
+    is_production=True has its artifact_path set; the rest get NULL.
+    """
+    is_pg = not engine.url.drivername.startswith("sqlite")
+    if is_pg:
+        sql = text(
+            "INSERT INTO models "
+            "(model_version, trial_number, rank_val, is_production, "
+            " hyperparams, architecture, train_samples, val_samples, test_samples, "
+            " mape_val, mape_test, mae_test, rmse_test, artifact_path) "
+            "VALUES (:ver, :tnum, :rank, :isprod, "
+            " :hp, :arch, :tr, :va, :te, "
+            " :mval, :mtest, :maet, :rmset, :apath) "
+            "ON CONFLICT DO NOTHING"
+        )
+    else:
+        sql = text(
+            "INSERT OR IGNORE INTO models "
+            "(model_version, trial_number, rank_val, is_production, "
+            " hyperparams, architecture, train_samples, val_samples, test_samples, "
+            " mape_val, mape_test, mae_test, rmse_test, artifact_path) "
+            "VALUES (:ver, :tnum, :rank, :isprod, "
+            " :hp, :arch, :tr, :va, :te, "
+            " :mval, :mtest, :maet, :rmset, :apath)"
+        )
+    with engine.begin() as conn:
+        for res in eval_results:
+            params = res["params"]
+            # Tuning hyperparams (what Optuna searched over)
+            hp_json = json.dumps({
+                k: params[k]
+                for k in ("hidden_size", "num_encoder_layers", "num_decoder_layers",
+                          "dropout", "lr", "n_epochs", "batch_size", "decoder_output_dim")
+                if k in params
+            })
+            # Fixed architecture (not searched by Optuna)
+            arch_json = json.dumps({
+                "input_chunk_length":  params.get("input_chunk_length", INPUT_CHUNK),
+                "output_chunk_length": OUTPUT_CHUNK,
+                "forecast_horizon":    FORECAST_HORIZON,
+                "use_layer_norm":      True,
+                "temporal_width_past": min(4, params.get("input_chunk_length", INPUT_CHUNK)),
+                "temporal_width_future": min(4, params.get("input_chunk_length", INPUT_CHUNK)),
+            })
+            is_prod   = bool(res.get("is_production"))
+            art_path  = TIDE_MODEL_PATH if is_prod else None
+            conn.execute(sql, {
+                "ver":   model_version,
+                "tnum":  res["trial_number"],
+                "rank":  res["rank_val"],
+                "isprod": int(is_prod) if not is_pg else is_prod,
+                "hp":    hp_json,
+                "arch":  arch_json,
+                "tr":    train_size,
+                "va":    val_size,
+                "te":    test_size,
+                "mval":  res.get("mape_val"),
+                "mtest": res.get("mape_test"),
+                "maet":  res.get("mae_test"),
+                "rmset": res.get("rmse_test"),
+                "apath": art_path,
+            })
+
+
+# ---------------------------------------------------------------------------
+# training_loss table writer
+# ---------------------------------------------------------------------------
+
+def write_training_loss(engine, model_version, trial_number, rank_val, work_dir):
+    """
+    Read the CSVLogger metrics.csv from work_dir/logs/ and persist epoch-level
+    train/val loss rows to the training_loss table.
+    """
+    import csv as _csv
+
+    csv_path = Path(work_dir) / "logs" / "metrics.csv"
+    if not csv_path.exists():
+        print(f"  [loss] metrics.csv not found at {csv_path}, skipping")
+        return
+
+    rows = []
+    try:
+        with open(csv_path, newline="") as f:
+            reader = _csv.DictReader(f)
+            for record in reader:
+                epoch_val = record.get("epoch")
+                if epoch_val is None or epoch_val == "":
+                    continue
+                try:
+                    epoch_int = int(float(epoch_val))
+                except ValueError:
+                    continue
+                # Detect train_loss and val_loss column names flexibly
+                train_loss = None
+                val_loss   = None
+                for col, val in record.items():
+                    col_l = col.lower()
+                    if val in ("", None):
+                        continue
+                    try:
+                        fval = float(val)
+                    except ValueError:
+                        continue
+                    if "train" in col_l and "loss" in col_l:
+                        train_loss = fval
+                    elif "val" in col_l and "loss" in col_l:
+                        val_loss = fval
+                rows.append((epoch_int, train_loss, val_loss))
+    except Exception as exc:
+        print(f"  [loss] could not parse {csv_path}: {exc}")
+        return
+
+    if not rows:
+        return
+
+    is_pg = not engine.url.drivername.startswith("sqlite")
+    if is_pg:
+        sql = text(
+            "INSERT INTO training_loss "
+            "(model_version, trial_number, rank_val, epoch, train_loss, val_loss) "
+            "VALUES (:ver, :tnum, :rank, :ep, :tl, :vl) "
+            "ON CONFLICT DO NOTHING"
+        )
+    else:
+        sql = text(
+            "INSERT OR IGNORE INTO training_loss "
+            "(model_version, trial_number, rank_val, epoch, train_loss, val_loss) "
+            "VALUES (:ver, :tnum, :rank, :ep, :tl, :vl)"
+        )
+    with engine.begin() as conn:
+        for ep, tl, vl in rows:
+            conn.execute(sql, {
+                "ver":  model_version,
+                "tnum": trial_number,
+                "rank": rank_val,
+                "ep":   ep,
+                "tl":   tl,
+                "vl":   vl,
+            })
+    print(f"  [loss] trial {trial_number}: {len(rows)} epoch rows written")
 
 
 # ---------------------------------------------------------------------------
@@ -393,8 +527,6 @@ def main():
     study = optuna.create_study(
         direction="minimize",
         study_name=STUDY_NAME,
-        storage=OPTUNA_DB_URL,
-        load_if_exists=True,
     )
     study.optimize(objective, n_trials=OPTUNA_N_TRIALS, show_progress_bar=False)
 
@@ -435,10 +567,6 @@ def main():
             f"RMSE={test_metrics['rmse']:.4f}"
         )
 
-        # Copy loss CSV for dashboard
-        dest = str(Path(ARTIFACTS_DIR) / f"trial_{rank}")
-        _copy_loss_csv(work, dest)
-
         eval_results.append({
             "rank_val":     rank,
             "trial_number": trial.number,
@@ -473,17 +601,30 @@ def main():
     model_prod.save(TIDE_MODEL_PATH)
     print(f"Production model saved: {TIDE_MODEL_PATH}")
 
-    # ── Write training predictions (out-of-sample) ───────────────────────────
+    # ── Version stamp (used by all DB writers below) ──────────────────────────
     model_version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
+    # ── Write training predictions (all horizons, out-of-sample) ─────────────
     if best["val_preds"] is not None:
         write_training_predictions(engine, df, best["val_preds"], "val", model_version)
     write_training_predictions(engine, df, best["test_preds"], "test", model_version)
-    print(f"Training predictions written. Version: {model_version}")
+    print(f"Training predictions written (all horizons). Version: {model_version}")
 
     # ── Write Optuna trial results to DB ─────────────────────────────────────
     write_optuna_trials(engine, STUDY_NAME, eval_results, model_version)
     print(f"Optuna trial results written to DB ({len(eval_results)} rows)")
+
+    # ── Write finalist models to models table ─────────────────────────────────
+    write_models(engine, eval_results, model_version, TRAIN_SIZE, VAL_SIZE, TEST_SIZE)
+    print(f"Finalist models written to models table ({len(eval_results)} rows)")
+
+    # ── Write epoch loss curves to training_loss table ────────────────────────
+    for res in eval_results:
+        rank  = res["rank_val"]
+        tnum  = res["trial_number"]
+        work  = str(trials_dir / f"rank_{rank}_eval")
+        write_training_loss(engine, model_version, tnum, rank, work)
+    print("Training loss curves written to DB")
 
     # ── Save metadata ─────────────────────────────────────────────────────────
     metadata = {

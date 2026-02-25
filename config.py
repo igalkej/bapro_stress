@@ -27,7 +27,3 @@ FORECAST_HORIZON = int(os.getenv("FORECAST_HORIZON", "4"))
 # Optuna hyperparameter search
 OPTUNA_N_TRIALS = int(os.getenv("OPTUNA_N_TRIALS", "3"))
 OPTUNA_TOP_K    = int(os.getenv("OPTUNA_TOP_K",    "2"))
-OPTUNA_DB_URL   = os.getenv(
-    "OPTUNA_DB_URL",
-    f"sqlite:///{_REPO_ROOT / 'artifacts' / 'optuna.db'}",
-)

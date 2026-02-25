@@ -33,8 +33,9 @@ CREATE TABLE IF NOT EXISTS training_predictions (
     fsi_actual    FLOAT,
     fsi_pred      FLOAT NOT NULL,
     split         VARCHAR(10) NOT NULL,
+    horizon       INT   NOT NULL DEFAULT 1,
     model_version VARCHAR(255) NOT NULL,
-    UNIQUE (date, split)
+    UNIQUE (date, split, horizon)
 );
 
 CREATE TABLE IF NOT EXISTS daily_predictions (
@@ -57,4 +58,33 @@ CREATE TABLE IF NOT EXISTS optuna_trials (
     hyperparams   TEXT         NOT NULL,
     model_version VARCHAR(255),
     created_at    TIMESTAMP    DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS models (
+    id            SERIAL PRIMARY KEY,
+    model_version VARCHAR(255) NOT NULL,
+    trial_number  INT          NOT NULL,
+    rank_val      INT          NOT NULL,
+    is_production BOOLEAN      NOT NULL DEFAULT FALSE,
+    hyperparams   TEXT         NOT NULL,
+    architecture  TEXT         NOT NULL,
+    train_samples INT,
+    val_samples   INT,
+    test_samples  INT,
+    mape_val      FLOAT,
+    mape_test     FLOAT,
+    mae_test      FLOAT,
+    rmse_test     FLOAT,
+    artifact_path VARCHAR(512),
+    created_at    TIMESTAMP    DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS training_loss (
+    id            SERIAL PRIMARY KEY,
+    model_version VARCHAR(255) NOT NULL,
+    trial_number  INT          NOT NULL,
+    rank_val      INT          NOT NULL,
+    epoch         INT          NOT NULL,
+    train_loss    FLOAT,
+    val_loss      FLOAT
 );
