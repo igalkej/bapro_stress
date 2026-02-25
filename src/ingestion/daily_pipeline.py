@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from config import EMBEDDING_MODEL, TIDE_MODEL_PATH
+from config import EMBEDDING_MODEL, TIDE_MODEL_PATH, FORECAST_HORIZON
 from db.connection import get_engine
 from src.ingestion.gdelt_ingest import fetch_and_store_gdelt
 from src.ingestion.rss_scraper import fetch_and_store_rss
@@ -40,11 +40,17 @@ def _last_business_day() -> str:
     return last_bday.strftime("%Y-%m-%d")
 
 
+def _first_forecast_date(context_date: str) -> str:
+    """Return the first business day after context_date (= t+1 prediction date)."""
+    return (pd.Timestamp(context_date) + pd.offsets.BusinessDay(1)).strftime("%Y-%m-%d")
+
+
 def _prediction_exists(conn, date_str: str) -> bool:
-    """Return True if a daily prediction row already exists for this date."""
+    """Return True if a daily prediction row already exists for the first forecast date."""
+    first_pred_date = _first_forecast_date(date_str)
     result = conn.execute(
         text("SELECT COUNT(*) FROM daily_predictions WHERE date = :date"),
-        {"date": date_str},
+        {"date": first_pred_date},
     ).scalar()
     return (result or 0) > 0
 
@@ -133,8 +139,13 @@ def _load_tide_model(model_path: str):
     return model
 
 
-def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
-    """Load TiDE model and predict one step ahead. Returns stress score."""
+def _run_tide_prediction(
+    context_df: pd.DataFrame, model_path: str
+) -> list[tuple[str, float]]:
+    """Load TiDE model and predict FORECAST_HORIZON steps ahead.
+
+    Returns list of (date_str, score) for each forecasted business day.
+    """
     from darts import TimeSeries
 
     model = _load_tide_model(model_path)
@@ -161,16 +172,16 @@ def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
     )
     emb_df["date"] = ctx["date"].values
 
-    # Extend covariates by 1 extra business day (zero vector) so that
-    # future_covariates cover the output chunk when the model requires them.
+    # Extend covariates by FORECAST_HORIZON extra business days (zero vectors)
+    # so that future_covariates cover the full prediction window.
     last_date = pd.Timestamp(ctx["date"].iloc[-1])
-    next_bday = last_date + pd.offsets.BusinessDay(1)
-    extra_row = pd.DataFrame(
-        [np.zeros(emb_dim, dtype=np.float32)],
-        columns=[f"emb_{i}" for i in range(emb_dim)],
-    )
-    extra_row["date"] = next_bday
-    emb_df = pd.concat([emb_df, extra_row], ignore_index=True)
+    extra_rows = []
+    for i in range(1, FORECAST_HORIZON + 1):
+        extra_rows.append({
+            **{f"emb_{j}": 0.0 for j in range(emb_dim)},
+            "date": last_date + pd.offsets.BusinessDay(i),
+        })
+    emb_df = pd.concat([emb_df, pd.DataFrame(extra_rows)], ignore_index=True)
 
     cov_series = TimeSeries.from_dataframe(
         emb_df,
@@ -182,12 +193,19 @@ def _run_tide_prediction(context_df: pd.DataFrame, model_path: str) -> float:
     )
 
     pred = model.predict(
-        n=1,
+        n=FORECAST_HORIZON,
         series=fsi_series,
         past_covariates=cov_series,
         future_covariates=cov_series,
     )
-    return float(pred.values()[0, 0])
+    pred_dates = pd.bdate_range(
+        start=last_date + pd.offsets.BusinessDay(1),
+        periods=FORECAST_HORIZON,
+    )
+    return [
+        (d.strftime("%Y-%m-%d"), float(pred.values()[i, 0]))
+        for i, d in enumerate(pred_dates)
+    ]
 
 
 def _store_prediction(conn, date_str: str, score: float,
@@ -278,17 +296,20 @@ def run_daily(target_date: str | None = None) -> dict:
         log.error(msg)
         raise RuntimeError(msg)
 
-    stress_score = _run_tide_prediction(context_df, model_path)
-    log.info("Stress score for %s: %.4f", target_date, stress_score)
+    forecasts = _run_tide_prediction(context_df, model_path)
+    for pred_date, score in forecasts:
+        log.info("Forecast: %s -> %.4f", pred_date, score)
 
     with engine.begin() as conn:
-        _store_prediction(conn, target_date, stress_score, model_version, is_pg)
+        for pred_date, score in forecasts:
+            _store_prediction(conn, pred_date, score, model_version, is_pg)
 
     result = {
         "date": target_date,
         "gdelt_new": gdelt_new,
         "rss_new": rss_new,
-        "stress_score": stress_score,
+        "stress_score": forecasts[0][1] if forecasts else None,
+        "forecasts": {d: s for d, s in forecasts},
         "status": "ok",
     }
     log.info("Daily pipeline complete: %s", result)

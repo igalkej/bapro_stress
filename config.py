@@ -21,6 +21,9 @@ TIDE_MODEL_PATH = os.getenv("TIDE_MODEL_PATH", str(_REPO_ROOT / "artifacts" / "t
 LOGS_DIR = Path(os.getenv("LOGS_DIR", str(_REPO_ROOT / "logs")))
 FSI_CSV = _REPO_ROOT / "data" / "fsi_target.csv"
 
+# TiDE model hyperparameters (fixed)
+FORECAST_HORIZON = int(os.getenv("FORECAST_HORIZON", "4"))
+
 # Optuna hyperparameter search
 OPTUNA_N_TRIALS = int(os.getenv("OPTUNA_N_TRIALS", "3"))
 OPTUNA_TOP_K    = int(os.getenv("OPTUNA_TOP_K",    "2"))
