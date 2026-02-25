@@ -350,7 +350,8 @@ def main():
             verbose=False,
         )
         val_preds = _historical_forecasts(
-            model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE], TRAIN_SIZE
+            model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE],
+            TRAIN_SIZE + params["input_chunk_length"],
         )
         metrics = _eval_metrics(target_val, val_preds)
         _trial_val_preds[trial.number] = val_preds
@@ -394,7 +395,8 @@ def main():
             verbose=False,
         )
         test_preds = _historical_forecasts(
-            model_eval, target_test, cov_full, TRAIN_SIZE + VAL_SIZE
+            model_eval, target_test, cov_full,
+            TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
         )
         test_metrics = _eval_metrics(target_test, test_preds)
         print(

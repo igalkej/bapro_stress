@@ -239,7 +239,7 @@ def load_loss_curve(rank):
 # App layout
 # ---------------------------------------------------------------------------
 
-app = Dash(__name__, title="BAPRO Financial Stress")
+app = Dash(__name__, title="BAPRO Financial Stress", suppress_callback_exceptions=True)
 
 app.layout = html.Div(
     style={"fontFamily": "Arial, sans-serif", "backgroundColor": "#0d1117", "minHeight": "100vh"},
@@ -279,6 +279,7 @@ app.layout = html.Div(
         html.Div(id="tab-content", style={"padding": "24px 32px"}),
         dcc.Store(id="selected-date"),
         dcc.Store(id="history-store"),
+        dcc.Store(id="predict-selected-date"),
     ],
 )
 
@@ -391,8 +392,43 @@ def _predict_layout():
         # --- FSI history chart with range selector ---
         dcc.Graph(id="fsi-history-chart", style={"height": "380px"}),
 
-        # --- Daily score (auto-loaded from daily_predictions) ---
-        html.Div(id="predict-output", style={"marginTop": "24px"}),
+        # --- Date selector ---
+        html.Div(
+            style={"display": "flex", "gap": "12px", "alignItems": "center",
+                   "marginTop": "8px", "marginBottom": "20px"},
+            children=[
+                html.Label("Fecha:", style={"color": "#8b949e", "fontSize": "13px"}),
+                dcc.Dropdown(
+                    id="predict-date-dropdown",
+                    options=[],
+                    placeholder="Seleccionar fecha…",
+                    style={"width": "200px", "backgroundColor": "#161b22",
+                           "color": "#e6edf3", "border": "1px solid #30363d"},
+                    className="dark-dropdown",
+                ),
+            ],
+        ),
+
+        # --- News viewer | Daily score ---
+        html.Div(
+            style={"display": "flex", "gap": "24px", "marginBottom": "32px"},
+            children=[
+                html.Div(
+                    style={**_DARK_PANEL, "flex": "1.5"},
+                    children=[
+                        html.P("Noticias del dia", style=_SECTION_TITLE),
+                        html.Div(id="predict-doc-viewer",
+                                 style={"maxHeight": "380px", "overflowY": "auto"}),
+                    ],
+                ),
+                html.Div(
+                    style={**_DARK_PANEL, "flex": "1"},
+                    children=[
+                        html.Div(id="predict-output"),
+                    ],
+                ),
+            ],
+        ),
     ])
 
 
@@ -491,7 +527,8 @@ def render_ts_chart(data):
         font_color="#e6edf3",
         legend={"font": {"color": "#e6edf3"}, "bgcolor": "#0d1117",
                 "bordercolor": "#30363d", "borderwidth": 1},
-        xaxis={"gridcolor": "#21262d", "title": "Fecha", "tickformat": "%b %Y"},
+        xaxis={"gridcolor": "#21262d", "title": "Fecha", "tickformat": "%b %Y",
+               "hoverformat": "%d %b %Y"},
         yaxis={"gridcolor": "#21262d", "title": "FSI"},
         margin={"t": 16, "b": 40, "l": 60, "r": 20},
         hovermode="x unified",
@@ -1021,18 +1058,20 @@ def render_eda_content(tab):
 
 @app.callback(
     Output("fsi-history-chart", "figure"),
+    Output("predict-date-dropdown", "options"),
+    Output("predict-date-dropdown", "value"),
     Input("tabs", "value"),
 )
 def render_fsi_history_chart(tab):
     if tab != "tab-predict":
-        return go.Figure()
+        return go.Figure(), [], None
 
     data = fetch_daily_predictions()
     fsi_df = pd.DataFrame(data["fsi"])
     daily_df = pd.DataFrame(data["daily_preds"])
 
     if fsi_df.empty:
-        return _empty_fig("Sin datos FSI — ejecutar build_fsi_target.py y seed_fsi.py")
+        return _empty_fig("Sin datos FSI — ejecutar build_fsi_target.py y seed_fsi.py"), [], None
 
     fsi_df["date"] = pd.to_datetime(fsi_df["date"])
 
@@ -1085,7 +1124,12 @@ def render_fsi_history_chart(tab):
         ),
         yaxis={"gridcolor": "#21262d", "title": "FSI"},
     )
-    return fig
+
+    # Dropdown options: all FSI dates (sorted descending for usability)
+    all_dates = sorted(fsi_df["date"].dt.strftime("%Y-%m-%d").tolist())
+    options = [{"label": d, "value": d} for d in all_dates]
+    default_date = all_dates[-1] if all_dates else None
+    return fig, options, default_date
 
 
 def _build_gauge(score, lo, hi, pred_date):
@@ -1183,6 +1227,111 @@ def load_daily_score(tab):
     hi = score + 1.96 * test_rmse
 
     return _build_gauge(score, lo, hi, pred_date)
+
+
+# ---------------------------------------------------------------------------
+# Callbacks — predict tab: date selection + news viewer
+# ---------------------------------------------------------------------------
+
+@app.callback(
+    Output("predict-selected-date", "data"),
+    Input("fsi-history-chart", "clickData"),
+    Input("predict-date-dropdown", "value"),
+)
+def update_predict_selected_date(click_data, dropdown_value):
+    ctx = callback_context
+    if not ctx.triggered:
+        return dropdown_value
+    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    if trigger_id == "fsi-history-chart" and click_data:
+        point = click_data["points"][0]
+        return point["x"][:10]
+    return dropdown_value
+
+
+@app.callback(
+    Output("predict-doc-viewer", "children"),
+    Input("predict-selected-date", "data"),
+)
+def render_predict_doc_viewer(selected_date):
+    if not selected_date:
+        return html.P("Seleccionar una fecha para ver las noticias.",
+                      style={"color": "#8b949e", "fontSize": "13px"})
+
+    articles = fetch_articles_for_date(selected_date)
+
+    # Check daily_predictions for this date
+    engine = get_db_engine()
+    pred_info = None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT fsi_pred FROM daily_predictions WHERE date = :d"),
+                {"d": selected_date},
+            ).fetchone()
+        if row:
+            pred_info = float(row[0])
+    except Exception:
+        pass
+
+    header_parts = [
+        html.Span(selected_date, style={"color": "#388bfd", "fontWeight": "600"}),
+        html.Span(f"  — {len(articles)} articulo(s)",
+                  style={"color": "#8b949e", "fontSize": "12px"}),
+    ]
+    if pred_info is not None:
+        header_parts.append(
+            html.Span(
+                f"  |  FSI pred: {pred_info:.3f}",
+                style={"color": "#f0b429", "fontSize": "12px"},
+            )
+        )
+
+    if not articles:
+        return html.Div([
+            html.Div(header_parts, style={"marginBottom": "8px"}),
+            html.P("Sin noticias en la DB para esta fecha.",
+                   style={"color": "#8b949e", "fontSize": "12px"}),
+        ])
+
+    cards = []
+    for art in articles:
+        cards.append(html.Div(
+            style={
+                "borderBottom": "1px solid #21262d",
+                "paddingBottom": "10px",
+                "marginBottom": "10px",
+            },
+            children=[
+                html.Div([
+                    html.Span(art["source"], style={
+                        "backgroundColor": "#21262d",
+                        "color": "#8b949e",
+                        "fontSize": "10px",
+                        "padding": "2px 6px",
+                        "borderRadius": "3px",
+                        "marginRight": "8px",
+                    }),
+                    html.Span(art["headline"], style={
+                        "color": "#e6edf3",
+                        "fontSize": "12px",
+                    }),
+                ]),
+                html.A(
+                    art["url"],
+                    href=art["url"],
+                    target="_blank",
+                    style={"color": "#388bfd", "fontSize": "10px",
+                           "textDecoration": "none", "display": "block",
+                           "marginTop": "4px", "wordBreak": "break-all"},
+                ) if art["url"] else None,
+            ],
+        ))
+
+    return html.Div([
+        html.Div(header_parts, style={"marginBottom": "12px"}),
+        html.Div(cards),
+    ])
 
 
 # ---------------------------------------------------------------------------
