@@ -53,10 +53,10 @@ Sign validated vs PASO 2019 (Aug 12, 2019 stress peak).
 ## ML Model
 
 - **TiDE** (Temporal Identity Encoder) from Darts 0.41.0
-- Input chunk: 2 business days look-back
-- Output chunk: 1 business day ahead
-- Covariates: 384-dim mean-pooled article embeddings per day (past + future)
-- Days without articles: zero vector
+- Input chunk: tuned by Optuna (candidates: 2, 5, up to min(10, TRAIN_SIZE-2)); output chunk: 1 business day ahead
+- Lag offset: `historical_forecasts` start at `split_boundary + input_chunk_length` for both val and test, so the look-back window never includes observations from the other split (no boundary leakage)
+- Optuna guard: trials where `input_chunk_length >= VAL_SIZE` or `>= TEST_SIZE` are pruned to avoid out-of-bounds errors
+- Covariates: 384-dim mean-pooled article embeddings per day (past + future); zero vector for days without articles
 - Hyperparameters: tuned with Optuna (stored in `optuna_trials` table)
 - Train/val/test split: 70/15/15% dynamic
 - Model artifact: `artifacts/tide_model.pt`
@@ -123,6 +123,15 @@ docker compose up -d dashboard
 1. Ingest GDELT + RSS for the previous business day
 2. Embed new articles
 3. Run TiDE prediction → write to `daily_predictions`
+
+## Dashboard
+
+| Tab | Contents |
+|-----|---------|
+| **Entrenamiento** | FSI time series + out-of-sample val/test curves (with lag-offset start) + model metrics table + EDA sub-tabs (FSI distribution, articles/day, GDELT tone correlation, FSI components, Optuna trials, loss curves) |
+| **Predicciones** | FSI history chart with range selector + date dropdown + click-on-chart → news article viewer panel + daily stress score gauge with 95% CI |
+
+Hover format on Entrenamiento chart shows full date (`dd Mon YYYY`).
 
 ## Key conventions
 

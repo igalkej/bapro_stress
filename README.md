@@ -45,8 +45,8 @@ pgAdmin → http://localhost:5050 (admin@bapro.com / admin)
 
 | Tab | Contents |
 |-----|---------|
-| **Entrenamiento** | FSI historical series + out-of-sample val/test fit + model metrics |
-| **Predicciones** | Latest daily stress score gauge with 95% CI, prediction history chart |
+| **Entrenamiento** | FSI historical series + out-of-sample val/test fit + model metrics + EDA panels |
+| **Predicciones** | Daily stress score gauge with 95% CI, prediction history chart, date selector + click-to-select date → news article viewer |
 
 ## Repository structure
 
@@ -98,7 +98,8 @@ Active tables:
 ## ML details
 
 - **Model**: TiDE (Temporal Identity Encoder) — Darts 0.41.0
-- **Input**: 2 business days look-back; 1 day ahead
+- **Input**: `input_chunk_length` business days look-back (tuned by Optuna); 1 day ahead
+- **Lag offset**: val/test evaluation starts at `split_boundary + input_chunk_length` to avoid look-back window leaking training observations into held-out sets
 - **Covariates**: mean-pooled 384-dim article embeddings (past + future); zero vector on days without articles
 - **Uncertainty**: 95% CI from test-set RMSE
 - **Artifact**: `artifacts/tide_model.pt`
