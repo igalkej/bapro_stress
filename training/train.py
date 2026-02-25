@@ -273,7 +273,7 @@ def write_optuna_trials(engine, study_name, trial_results, model_version):
                 "mtest":  res.get("mape_test"),
                 "maet":   res.get("mae_test"),
                 "rmset":  res.get("rmse_test"),
-                "isprod": 1 if res.get("is_production") else 0,
+                "isprod": bool(res.get("is_production")),
                 "hp":     hp_json,
                 "ver":    model_version,
             })
@@ -325,6 +325,9 @@ def main():
         # Guard: input_chunk must leave room for historical_forecasts on TRAIN
         if TRAIN_SIZE <= input_chunk + 1:
             raise optuna.TrialPruned()
+        # Guard: after lag offset, at least 1 step must remain in VAL and TEST
+        if input_chunk >= VAL_SIZE or input_chunk >= TEST_SIZE:
+            raise optuna.TrialPruned()
 
         params = {
             "input_chunk_length": input_chunk,
@@ -350,7 +353,8 @@ def main():
             verbose=False,
         )
         val_preds = _historical_forecasts(
-            model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE], TRAIN_SIZE
+            model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE],
+            TRAIN_SIZE + params["input_chunk_length"],
         )
         metrics = _eval_metrics(target_val, val_preds)
         _trial_val_preds[trial.number] = val_preds
@@ -394,7 +398,8 @@ def main():
             verbose=False,
         )
         test_preds = _historical_forecasts(
-            model_eval, target_test, cov_full, TRAIN_SIZE + VAL_SIZE
+            model_eval, target_test, cov_full,
+            TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
         )
         test_metrics = _eval_metrics(target_test, test_preds)
         print(
