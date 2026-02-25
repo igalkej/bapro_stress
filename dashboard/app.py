@@ -84,7 +84,7 @@ def get_st_model():
 # ---------------------------------------------------------------------------
 
 def fetch_training_data():
-    """Load FSI actual series and out-of-sample training predictions."""
+    """Load FSI actual series and out-of-sample training predictions with horizon."""
     engine = get_db_engine()
     with engine.connect() as conn:
         fsi_rows = conn.execute(
@@ -92,22 +92,24 @@ def fetch_training_data():
         ).fetchall()
         pred_rows = conn.execute(
             text(
-                "SELECT date, fsi_actual, fsi_pred, split "
-                "FROM training_predictions ORDER BY date"
+                "SELECT date, fsi_actual, fsi_pred, split, horizon "
+                "FROM training_predictions ORDER BY date, split, horizon"
             )
         ).fetchall()
 
     fsi_list = [{"date": str(r[0])[:10], "fsi_value": float(r[1])} for r in fsi_rows]
     pred_list = [
         {
-            "date": str(r[0])[:10],
+            "date":       str(r[0])[:10],
             "fsi_actual": float(r[1]) if r[1] is not None else None,
-            "fsi_pred": float(r[2]),
-            "split": r[3],
+            "fsi_pred":   float(r[2]),
+            "split":      r[3],
+            "horizon":    int(r[4]) if r[4] is not None else 1,
         }
         for r in pred_rows
     ]
-    pred_dates = sorted({p["date"] for p in pred_list})
+    # pred_dates = unique dates where horizon==1 (1-step-ahead), for the dropdown
+    pred_dates = sorted({p["date"] for p in pred_list if p["horizon"] == 1})
     return {"fsi": fsi_list, "predictions": pred_list, "pred_dates": pred_dates}
 
 
@@ -201,16 +203,29 @@ def fetch_daily_predictions():
 
 
 def fetch_optuna_results():
-    """Return Optuna trial results from optuna_trials table. None if unavailable."""
+    """Return Optuna trial results for the latest training run. None if unavailable."""
     try:
         engine = get_db_engine()
         with engine.connect() as conn:
+            # Get model_version of the most recent production model
+            ver_row = conn.execute(
+                text(
+                    "SELECT model_version FROM models "
+                    "WHERE is_production = TRUE ORDER BY created_at DESC LIMIT 1"
+                )
+            ).fetchone()
+            if ver_row is None:
+                return None
+            current_version = ver_row[0]
             rows = conn.execute(
                 text(
                     "SELECT trial_number, rank_val, mape_val, mape_test, "
                     "is_production, hyperparams "
-                    "FROM optuna_trials ORDER BY rank_val"
-                )
+                    "FROM optuna_trials "
+                    "WHERE model_version = :ver "
+                    "ORDER BY rank_val"
+                ),
+                {"ver": current_version},
             ).fetchall()
         if not rows:
             return None
@@ -224,13 +239,35 @@ def fetch_optuna_results():
         return None
 
 
-def load_loss_curve(rank):
-    """Load loss curve CSV for a trial rank. None if unavailable."""
+def fetch_loss_curves():
+    """Return training_loss rows for the latest training run, or None if unavailable."""
     try:
-        csv_path = Path(ARTIFACTS_DIR) / f"trial_{rank}" / "metrics.csv"
-        if not csv_path.exists():
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            ver_row = conn.execute(
+                text(
+                    "SELECT model_version FROM models "
+                    "WHERE is_production = TRUE ORDER BY created_at DESC LIMIT 1"
+                )
+            ).fetchone()
+            if ver_row is None:
+                return None
+            current_version = ver_row[0]
+            rows = conn.execute(
+                text(
+                    "SELECT trial_number, rank_val, epoch, train_loss, val_loss "
+                    "FROM training_loss "
+                    "WHERE model_version = :ver "
+                    "ORDER BY trial_number, epoch"
+                ),
+                {"ver": current_version},
+            ).fetchall()
+        if not rows:
             return None
-        return pd.read_csv(csv_path)
+        return pd.DataFrame(
+            rows,
+            columns=["trial_number", "rank_val", "epoch", "train_loss", "val_loss"],
+        )
     except Exception:
         return None
 
@@ -500,27 +537,52 @@ def render_ts_chart(data):
         mode="lines",
     ))
 
-    # --- VAL predictions ---
+    # --- Rolling-window fan chart + bold h=1 series ---
     if has_preds:
         pred_df["date"] = pd.to_datetime(pred_df["date"])
-        val_df = pred_df[pred_df["split"] == "val"]
-        if not val_df.empty:
-            fig.add_trace(go.Scatter(
-                x=val_df["date"], y=val_df["fsi_pred"],
-                name="Pred. VAL (out-of-sample)",
-                line={"color": "#f0b429", "width": 2, "dash": "dot"},
-                mode="lines+markers", marker={"size": 5, "symbol": "diamond"},
-            ))
 
-        # --- TEST predictions ---
-        test_df = pred_df[pred_df["split"] == "test"]
-        if not test_df.empty:
-            fig.add_trace(go.Scatter(
-                x=test_df["date"], y=test_df["fsi_pred"],
-                name="Pred. TEST (out-of-sample)",
-                line={"color": "#2ea043", "width": 2, "dash": "dot"},
-                mode="lines+markers", marker={"size": 5, "symbol": "diamond"},
-            ))
+        for split_name, bold_color, fan_color, label_h1 in [
+            ("val",  "#f0b429", "rgba(240,180,41,0.35)",  "Pred. VAL h=1 (out-of-sample)"),
+            ("test", "#2ea043", "rgba(46,160,67,0.35)",   "Pred. TEST h=1 (out-of-sample)"),
+        ]:
+            sdf = pred_df[pred_df["split"] == split_name].copy()
+            if sdf.empty:
+                continue
+
+            # Compute window_start = date - horizon business days back
+            # pd.bdate_range(end=date, periods=horizon+1)[0] gives window origin
+            def _window_start(row):
+                return pd.bdate_range(end=row["date"], periods=int(row["horizon"]) + 1)[0]
+
+            sdf["window_start"] = sdf.apply(_window_start, axis=1)
+
+            # Draw each window as a thin fan line
+            first_window = True
+            for ws, wdf in sdf.groupby("window_start"):
+                wdf = wdf.sort_values("horizon")
+                fig.add_trace(go.Scatter(
+                    x=wdf["date"], y=wdf["fsi_pred"],
+                    name=f"Ventanas {split_name.upper()}" if first_window else None,
+                    showlegend=first_window,
+                    legendgroup=f"fan_{split_name}",
+                    line={"color": fan_color, "width": 1},
+                    mode="lines+markers",
+                    marker={"size": 3, "color": fan_color},
+                    hoverinfo="skip",
+                ))
+                first_window = False
+
+            # Bold h=1 series on top
+            h1_df = sdf[sdf["horizon"] == 1].sort_values("date")
+            if not h1_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=h1_df["date"], y=h1_df["fsi_pred"],
+                    name=label_h1,
+                    legendgroup=f"h1_{split_name}",
+                    line={"color": bold_color, "width": 2, "dash": "dot"},
+                    mode="lines+markers",
+                    marker={"size": 5, "symbol": "diamond", "color": bold_color},
+                ))
 
     fig.update_layout(
         paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
@@ -577,7 +639,8 @@ def update_doc_viewer(selected_date, data):
     ]
     if data and data.get("predictions"):
         pred_df = pd.DataFrame(data["predictions"])
-        row = pred_df[pred_df["date"] == selected_date]
+        # Show 1-step-ahead prediction for the selected date
+        row = pred_df[(pred_df["date"] == selected_date) & (pred_df["horizon"] == 1)]
         if not row.empty:
             r = row.iloc[0]
             pred_val = r.get("fsi_pred")
@@ -1003,49 +1066,32 @@ def render_eda_content(tab):
 
     # ── 4f. Loss Curves ──────────────────────────────────────────────────────
     if tab == "eda-loss":
+        loss_df = fetch_loss_curves()
+        if loss_df is None:
+            return dcc.Graph(figure=_no_data_fig(
+                "Curvas de loss no disponibles — ejecutar training/train.py (ML-03)"
+            ))
         colors = ["#388bfd", "#f0b429", "#f78166", "#2ea043"]
         fig = go.Figure()
-        found_any = False
-        for rank in [1, 2]:
-            df_loss = load_loss_curve(rank)
-            if df_loss is None:
-                continue
-            found_any = True
-            color = colors[(rank - 1) % len(colors)]
-            # Try common column names from PyTorch Lightning CSV logger
-            epoch_col = next(
-                (c for c in df_loss.columns if "epoch" in c.lower()), None
-            )
-            train_col = next(
-                (c for c in df_loss.columns
-                 if "train" in c.lower() and "loss" in c.lower()), None
-            )
-            val_col = next(
-                (c for c in df_loss.columns
-                 if "val" in c.lower() and "loss" in c.lower()), None
-            )
-            if epoch_col is None:
-                continue
-            epoch_vals = df_loss[epoch_col].dropna()
-            if train_col:
+        for rank, grp in loss_df.groupby("rank_val"):
+            tnum  = int(grp["trial_number"].iloc[0])
+            color = colors[(int(rank) - 1) % len(colors)]
+            grp_s = grp.sort_values("epoch")
+            if grp_s["train_loss"].notna().any():
                 fig.add_trace(go.Scatter(
-                    x=epoch_vals, y=df_loss[train_col].dropna(),
-                    name=f"Trial {rank} train",
+                    x=grp_s["epoch"], y=grp_s["train_loss"],
+                    name=f"Trial {tnum} (rank {rank}) train",
                     line={"color": color, "width": 2},
                     mode="lines",
                 ))
-            if val_col:
+            if grp_s["val_loss"].notna().any():
                 fig.add_trace(go.Scatter(
-                    x=epoch_vals, y=df_loss[val_col].dropna(),
-                    name=f"Trial {rank} val",
+                    x=grp_s["epoch"], y=grp_s["val_loss"],
+                    name=f"Trial {tnum} (rank {rank}) val",
                     line={"color": color, "width": 2, "dash": "dot"},
                     mode="lines",
                 ))
-        if not found_any:
-            return dcc.Graph(figure=_no_data_fig(
-                "Curvas de loss no disponibles — ejecutar train.py con Optuna (ML-02)"
-            ))
-        _fig_layout(fig, "Curvas de loss por trial", height=360)
+        _fig_layout(fig, "Curvas de loss por trial (finalists)", height=360)
         fig.update_layout(xaxis_title="Epoch", yaxis_title="Loss")
         return dcc.Graph(figure=fig)
 
