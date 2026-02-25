@@ -273,7 +273,7 @@ def write_optuna_trials(engine, study_name, trial_results, model_version):
                 "mtest":  res.get("mape_test"),
                 "maet":   res.get("mae_test"),
                 "rmset":  res.get("rmse_test"),
-                "isprod": 1 if res.get("is_production") else 0,
+                "isprod": bool(res.get("is_production")),
                 "hp":     hp_json,
                 "ver":    model_version,
             })
