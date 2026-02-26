@@ -27,6 +27,7 @@ from config import EMBEDDING_MODEL, TIDE_MODEL_PATH, FORECAST_HORIZON
 from db.connection import get_engine
 from src.ingestion.gdelt_ingest import fetch_and_store_gdelt
 from src.ingestion.rss_scraper import fetch_and_store_rss
+from src.data.update_fsi_daily import update_fsi_daily
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -252,6 +253,13 @@ def run_daily(target_date: str | None = None) -> dict:
             log.info("Prediction already exists for %s. Skipping.", target_date)
             print(f"Prediction already exists. Skipping.")
             return {"date": target_date, "status": "skipped"}
+
+    # Refresh FSI target with latest market data (non-fatal if yfinance is down)
+    try:
+        fsi_result = update_fsi_daily(target_date)
+        log.info("FSI updated: %s", fsi_result)
+    except Exception as exc:
+        log.warning("FSI daily update failed (non-fatal): %s", exc)
 
     # Ingest
     gdelt_new = fetch_and_store_gdelt(target_date, target_date)

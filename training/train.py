@@ -217,7 +217,8 @@ def _eval_metrics(target, preds):
 # training_predictions table writer
 # ---------------------------------------------------------------------------
 
-def write_training_predictions(engine, df, preds_list, split, model_version):
+def write_training_predictions(engine, df, preds_list, split, model_version,
+                               trial_number=0):
     """
     Write per-window forecast results to training_predictions, preserving
     every horizon step (1..FORECAST_HORIZON) for each rolling window.
@@ -225,6 +226,9 @@ def write_training_predictions(engine, df, preds_list, split, model_version):
     preds_list is a list[TimeSeries] (one per rolling window).  Each window's
     TimeSeries contains up to FORECAST_HORIZON time steps, stored with their
     horizon index so all predictions are visible in the dashboard fan chart.
+
+    trial_number tags the predictions to the originating finalist trial so
+    the comparison tab can overlay multiple finalists' predictions.
     """
     is_pg = not engine.url.drivername.startswith("sqlite")
 
@@ -236,17 +240,17 @@ def write_training_predictions(engine, df, preds_list, split, model_version):
     if is_pg:
         upsert_sql = text(
             "INSERT INTO training_predictions "
-            "(date, fsi_actual, fsi_pred, split, horizon, model_version) "
-            "VALUES (:date, :actual, :pred, :split, :horizon, :version) "
-            "ON CONFLICT (date, split, horizon) DO UPDATE SET "
+            "(date, fsi_actual, fsi_pred, split, horizon, trial_number, model_version) "
+            "VALUES (:date, :actual, :pred, :split, :horizon, :trial, :version) "
+            "ON CONFLICT (date, split, horizon, trial_number) DO UPDATE SET "
             "fsi_actual=EXCLUDED.fsi_actual, fsi_pred=EXCLUDED.fsi_pred, "
             "model_version=EXCLUDED.model_version"
         )
     else:
         upsert_sql = text(
             "INSERT OR REPLACE INTO training_predictions "
-            "(date, fsi_actual, fsi_pred, split, horizon, model_version) "
-            "VALUES (:date, :actual, :pred, :split, :horizon, :version)"
+            "(date, fsi_actual, fsi_pred, split, horizon, trial_number, model_version) "
+            "VALUES (:date, :actual, :pred, :split, :horizon, :trial, :version)"
         )
 
     with engine.begin() as conn:
@@ -265,6 +269,7 @@ def write_training_predictions(engine, df, preds_list, split, model_version):
                     "pred":    pred_val,
                     "split":   split,
                     "horizon": horizon_step,
+                    "trial":   trial_number,
                     "version": model_version,
                 })
 
@@ -604,11 +609,16 @@ def main():
     # ── Version stamp (used by all DB writers below) ──────────────────────────
     model_version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    # ── Write training predictions (all horizons, out-of-sample) ─────────────
-    if best["val_preds"] is not None:
-        write_training_predictions(engine, df, best["val_preds"], "val", model_version)
-    write_training_predictions(engine, df, best["test_preds"], "test", model_version)
-    print(f"Training predictions written (all horizons). Version: {model_version}")
+    # ── Write training predictions for ALL finalists (all horizons, out-of-sample) ─
+    for res in eval_results:
+        tnum = res["trial_number"]
+        if res["val_preds"] is not None:
+            write_training_predictions(engine, df, res["val_preds"], "val",
+                                       model_version, tnum)
+        write_training_predictions(engine, df, res["test_preds"], "test",
+                                   model_version, tnum)
+    print(f"Training predictions written (all horizons, {len(eval_results)} trials). "
+          f"Version: {model_version}")
 
     # ── Write Optuna trial results to DB ─────────────────────────────────────
     write_optuna_trials(engine, STUDY_NAME, eval_results, model_version)

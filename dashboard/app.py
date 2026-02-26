@@ -84,18 +84,44 @@ def get_st_model():
 # ---------------------------------------------------------------------------
 
 def fetch_training_data():
-    """Load FSI actual series and out-of-sample training predictions with horizon."""
+    """Load FSI actual series and production model's training predictions with horizon."""
     engine = get_db_engine()
     with engine.connect() as conn:
         fsi_rows = conn.execute(
             text("SELECT date, fsi_value FROM fsi_target ORDER BY date")
         ).fetchall()
-        pred_rows = conn.execute(
-            text(
-                "SELECT date, fsi_actual, fsi_pred, split, horizon "
-                "FROM training_predictions ORDER BY date, split, horizon"
-            )
-        ).fetchall()
+
+        # Get production model's trial_number to filter predictions
+        prod_row = None
+        try:
+            prod_row = conn.execute(
+                text(
+                    "SELECT trial_number FROM models "
+                    "WHERE is_production = TRUE ORDER BY created_at DESC LIMIT 1"
+                )
+            ).fetchone()
+        except Exception:
+            pass
+
+        if prod_row is not None:
+            prod_trial = prod_row[0]
+            pred_rows = conn.execute(
+                text(
+                    "SELECT date, fsi_actual, fsi_pred, split, horizon "
+                    "FROM training_predictions "
+                    "WHERE trial_number = :trial "
+                    "ORDER BY date, split, horizon"
+                ),
+                {"trial": prod_trial},
+            ).fetchall()
+        else:
+            # Fallback: return all predictions (pre-ML-04 data or empty models table)
+            pred_rows = conn.execute(
+                text(
+                    "SELECT date, fsi_actual, fsi_pred, split, horizon "
+                    "FROM training_predictions ORDER BY date, split, horizon"
+                )
+            ).fetchall()
 
     fsi_list = [{"date": str(r[0])[:10], "fsi_value": float(r[1])} for r in fsi_rows]
     pred_list = [
@@ -272,6 +298,48 @@ def fetch_loss_curves():
         return None
 
 
+def fetch_finalist_preds():
+    """
+    Return all finalists' training predictions for the current model_version.
+    Used by the Comparar Modelos EDA tab.
+    Returns DataFrame with columns: date, fsi_actual, fsi_pred, split, horizon, trial_number
+    or None if unavailable.
+    """
+    try:
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            ver_row = conn.execute(
+                text(
+                    "SELECT model_version FROM models "
+                    "WHERE is_production = TRUE ORDER BY created_at DESC LIMIT 1"
+                )
+            ).fetchone()
+            if ver_row is None:
+                return None
+            current_version = ver_row[0]
+            rows = conn.execute(
+                text(
+                    "SELECT date, fsi_actual, fsi_pred, split, horizon, trial_number "
+                    "FROM training_predictions "
+                    "WHERE model_version = :ver "
+                    "ORDER BY trial_number, split, date, horizon"
+                ),
+                {"ver": current_version},
+            ).fetchall()
+        if not rows:
+            return None
+        df = pd.DataFrame(
+            rows,
+            columns=["date", "fsi_actual", "fsi_pred", "split", "horizon", "trial_number"],
+        )
+        df["date"] = pd.to_datetime(df["date"].astype(str).str[:10])
+        df["horizon"] = df["horizon"].fillna(1).astype(int)
+        df["trial_number"] = df["trial_number"].fillna(0).astype(int)
+        return df
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # App layout
 # ---------------------------------------------------------------------------
@@ -391,7 +459,7 @@ def _history_layout():
                 html.Div(
                     style={**_DARK_PANEL, "flex": "1"},
                     children=[
-                        html.P("Metricas del modelo", style=_SECTION_TITLE),
+                        html.P("Metricas del modelo en produccion", style=_SECTION_TITLE),
                         html.Div(id="model-quality-content"),
                     ],
                 ),
@@ -417,6 +485,8 @@ def _history_layout():
                 dcc.Tab(label="Optuna Trials",       value="eda-optuna",
                         style=_TAB_STYLE, selected_style=_TAB_SELECTED),
                 dcc.Tab(label="Curvas de Loss",      value="eda-loss",
+                        style=_TAB_STYLE, selected_style=_TAB_SELECTED),
+                dcc.Tab(label="Comparar Modelos",    value="eda-compare",
                         style=_TAB_STYLE, selected_style=_TAB_SELECTED),
             ],
         ),
@@ -572,7 +642,7 @@ def render_ts_chart(data):
                 ))
                 first_window = False
 
-            # Bold h=1 series on top
+            # Bold h=1 series on top — markers only (points are from different windows)
             h1_df = sdf[sdf["horizon"] == 1].sort_values("date")
             if not h1_df.empty:
                 fig.add_trace(go.Scatter(
@@ -580,7 +650,7 @@ def render_ts_chart(data):
                     name=label_h1,
                     legendgroup=f"h1_{split_name}",
                     line={"color": bold_color, "width": 2, "dash": "dot"},
-                    mode="lines+markers",
+                    mode="markers",
                     marker={"size": 5, "symbol": "diamond", "color": bold_color},
                 ))
 
@@ -737,13 +807,13 @@ def render_model_quality(_):
     rows = []
     if has_mape:
         rows.append(html.Tr([
-            _td("VAL (best trial)", bold=True),
+            _td("VAL", bold=True),
             _td(_fmt(metadata.get("mape_val_best")), color="#f0b429"),
             _td("—"), _td("—"),
             _td(str(metadata.get("val_samples", "—"))),
         ]))
         rows.append(html.Tr([
-            _td("TEST (prod model)", bold=True),
+            _td("TEST", bold=True),
             _td(_fmt(metadata.get("mape_test_prod")), color="#2ea043"),
             _td(_fmt(metadata.get("mae_test_prod"))),
             _td(_fmt(metadata.get("rmse_test_prod"))),
@@ -1095,7 +1165,180 @@ def render_eda_content(tab):
         fig.update_layout(xaxis_title="Epoch", yaxis_title="Loss")
         return dcc.Graph(figure=fig)
 
+    # ── 4g. Comparar Modelos ─────────────────────────────────────────────────
+    if tab == "eda-compare":
+        optuna_df = fetch_optuna_results()
+        if optuna_df is None:
+            return html.Div(
+                html.P(
+                    "Datos de modelos no disponibles — ejecutar training/train.py.",
+                    style={"color": "#8b949e", "fontSize": "13px"},
+                ),
+                style=_DARK_PANEL,
+            )
+        options = []
+        default_vals = []
+        for _, r in optuna_df.iterrows():
+            is_prod = bool(r.get("is_production"))
+            tnum = int(r["trial_number"])
+            rank = int(r["rank_val"])
+            label = f"Trial {tnum} (rank {rank})"
+            if is_prod:
+                label += "  [PROD]"
+                default_vals.append(tnum)
+            options.append({"label": label, "value": tnum})
+        # Default: all trials selected
+        if not default_vals:
+            default_vals = [o["value"] for o in options]
+        return html.Div([
+            html.Div(
+                style={"marginBottom": "12px"},
+                children=[
+                    html.P("Seleccionar trials a comparar:",
+                           style={**_SECTION_TITLE, "marginBottom": "6px"}),
+                    dcc.Checklist(
+                        id="compare-trial-checklist",
+                        options=options,
+                        value=default_vals,
+                        inline=True,
+                        labelStyle={
+                            "color": "#e6edf3", "fontSize": "12px",
+                            "marginRight": "20px", "cursor": "pointer",
+                        },
+                        inputStyle={"marginRight": "6px"},
+                    ),
+                ],
+            ),
+            dcc.Graph(id="compare-chart", style={"height": "440px"}),
+        ])
+
     return html.P("Tab no reconocido.", style={"color": "#8b949e"})
+
+
+# ---------------------------------------------------------------------------
+# Callbacks — Comparar Modelos chart
+# ---------------------------------------------------------------------------
+
+_COMPARE_COLORS = ["#f0b429", "#f78166", "#2ea043", "#a371f7"]
+
+
+@app.callback(
+    Output("compare-chart", "figure"),
+    Input("compare-trial-checklist", "value"),
+)
+def render_compare_chart(selected_trials):
+    if not selected_trials:
+        return _empty_fig("Seleccionar al menos un trial")
+
+    preds_df = fetch_finalist_preds()
+    if preds_df is None or preds_df.empty:
+        return _empty_fig("Sin predicciones de finalists — ejecutar training/train.py (ML-04)")
+
+    fsi_data = fetch_training_data()
+    fsi_df = pd.DataFrame(fsi_data["fsi"])
+    fsi_df["date"] = pd.to_datetime(fsi_df["date"])
+
+    optuna_df = fetch_optuna_results()
+
+    _, metadata = load_artifacts()
+    fig = go.Figure()
+
+    # --- Shaded regions ---
+    if metadata and len(fsi_df) > 0:
+        n = len(fsi_df)
+        train_size = metadata.get("train_samples", int(n * 0.70))
+        val_size   = metadata.get("val_samples",   int(n * 0.15))
+        t_end  = fsi_df["date"].iloc[min(train_size - 1, n - 1)]
+        v_end  = fsi_df["date"].iloc[min(train_size + val_size - 1, n - 1)]
+        s_start = fsi_df["date"].iloc[0]
+        s_end   = fsi_df["date"].iloc[-1]
+        for x0, x1, color, label in [
+            (s_start, t_end, "rgba(56,139,253,0.07)",  "TRAIN"),
+            (t_end,   v_end, "rgba(240,180,41,0.10)",  "VAL"),
+            (v_end,   s_end, "rgba(46,160,67,0.10)",   "TEST"),
+        ]:
+            fig.add_vrect(
+                x0=x0, x1=x1, fillcolor=color, layer="below", line_width=0,
+                annotation_text=label, annotation_position="top left",
+                annotation_font={"size": 10, "color": "#8b949e"},
+            )
+
+    # --- FSI actual ---
+    fig.add_trace(go.Scatter(
+        x=fsi_df["date"], y=fsi_df["fsi_value"],
+        name="FSI Real",
+        line={"color": "#388bfd", "width": 2},
+        mode="lines",
+    ))
+
+    # --- Per-trial fan chart ---
+    for trial_num in selected_trials:
+        tdf = preds_df[preds_df["trial_number"] == trial_num].copy()
+        if tdf.empty:
+            continue
+
+        # Determine rank for color assignment
+        rank = 1
+        if optuna_df is not None and not optuna_df.empty:
+            match = optuna_df[optuna_df["trial_number"] == trial_num]
+            if not match.empty:
+                rank = int(match.iloc[0]["rank_val"])
+        color_solid = _COMPARE_COLORS[(rank - 1) % len(_COMPARE_COLORS)]
+        # Fan color = semi-transparent version
+        r_hex = int(color_solid[1:3], 16)
+        g_hex = int(color_solid[3:5], 16)
+        b_hex = int(color_solid[5:7], 16)
+        fan_color = f"rgba({r_hex},{g_hex},{b_hex},0.35)"
+
+        for split_name in ["val", "test"]:
+            sdf = tdf[tdf["split"] == split_name].copy()
+            if sdf.empty:
+                continue
+
+            def _window_start(row):
+                return pd.bdate_range(end=row["date"], periods=int(row["horizon"]) + 1)[0]
+
+            sdf["window_start"] = sdf.apply(_window_start, axis=1)
+
+            first_window = True
+            for ws, wdf in sdf.groupby("window_start"):
+                wdf = wdf.sort_values("horizon")
+                fig.add_trace(go.Scatter(
+                    x=wdf["date"], y=wdf["fsi_pred"],
+                    name=f"Trial {trial_num} {split_name.upper()} windows"
+                    if first_window else None,
+                    showlegend=first_window,
+                    legendgroup=f"compare_t{trial_num}_{split_name}",
+                    line={"color": fan_color, "width": 1},
+                    mode="lines+markers",
+                    marker={"size": 3, "color": fan_color},
+                    hoverinfo="skip",
+                ))
+                first_window = False
+
+            h1_df = sdf[sdf["horizon"] == 1].sort_values("date")
+            if not h1_df.empty:
+                fig.add_trace(go.Scatter(
+                    x=h1_df["date"], y=h1_df["fsi_pred"],
+                    name=f"Trial {trial_num} {split_name.upper()} h=1",
+                    legendgroup=f"compare_t{trial_num}_{split_name}",
+                    line={"color": color_solid, "width": 2, "dash": "dot"},
+                    mode="markers",
+                    marker={"size": 5, "symbol": "diamond", "color": color_solid},
+                ))
+
+    fig.update_layout(
+        paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
+        font_color="#e6edf3",
+        legend={"font": {"color": "#e6edf3"}, "bgcolor": "#0d1117",
+                "bordercolor": "#30363d", "borderwidth": 1},
+        xaxis={"gridcolor": "#21262d", "title": "Fecha", "tickformat": "%b %Y",
+               "hoverformat": "%d %b %Y"},
+        yaxis={"gridcolor": "#21262d", "title": "FSI"},
+        margin={"t": 16, "b": 40, "l": 60, "r": 20},
+        hovermode="x unified",
+    )
+    return fig
 
 
 # ---------------------------------------------------------------------------

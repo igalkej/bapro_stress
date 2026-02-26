@@ -38,8 +38,9 @@ CREATE TABLE IF NOT EXISTS training_predictions (
     fsi_pred      REAL NOT NULL,
     split         TEXT NOT NULL,
     horizon       INTEGER NOT NULL DEFAULT 1,
+    trial_number  INTEGER NOT NULL DEFAULT 0,
     model_version TEXT NOT NULL,
-    UNIQUE (date, split, horizon)
+    UNIQUE (date, split, horizon, trial_number)
 );
 
 CREATE TABLE IF NOT EXISTS daily_predictions (
