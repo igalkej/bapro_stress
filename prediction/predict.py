@@ -21,6 +21,9 @@ from sqlalchemy import text
 
 from config import TIDE_MODEL_PATH, FORECAST_HORIZON
 from db.connection import get_engine
+from src.utils.log import get_logger
+
+log = get_logger(__name__)
 
 
 def load_context(engine, target_date: str, n_steps: int):
@@ -89,17 +92,20 @@ def run_predict(target_date: str) -> float:
     from darts import TimeSeries
 
     if not Path(TIDE_MODEL_PATH).exists():
-        print(f"Model not found at {TIDE_MODEL_PATH}. Run training/train.py first.")
+        log.error("model_not_found", path=TIDE_MODEL_PATH,
+                  hint="Run training/train.py first")
         sys.exit(1)
 
     model = _load_model()
     input_chunk = model.input_chunk_length
+    assert input_chunk >= 1, f"model.input_chunk_length must be >= 1, got {input_chunk}"
 
     engine = get_engine()
     ctx = load_context(engine, target_date, input_chunk)
 
     if len(ctx) < input_chunk:
-        print(f"Need at least {input_chunk} days of context, found {len(ctx)}.")
+        log.error("insufficient_context", need=input_chunk, found=len(ctx),
+                  target_date=target_date)
         sys.exit(1)
 
     ctx = ctx.tail(input_chunk).reset_index(drop=True)
@@ -163,7 +169,7 @@ def main():
     args = parser.parse_args()
 
     predictions = run_predict(args.date)
-    print(f"Forecast from context date {args.date} ({FORECAST_HORIZON}-day horizon):")
+    log.info("predict_results", context_date=args.date, horizon=FORECAST_HORIZON)
     for date_str, score in predictions:
         if score >= 2.5:
             label = "ALTO ESTRES"
@@ -173,7 +179,7 @@ def main():
             label = "NEUTRAL"
         else:
             label = "CALMA"
-        print(f"  {date_str}: {score:.4f}  [{label}]")
+        log.info("predict_score", date=date_str, score=round(score, 4), label=label)
 
 
 if __name__ == "__main__":

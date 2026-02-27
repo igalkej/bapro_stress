@@ -30,10 +30,13 @@ from config import (
     OPTUNA_N_TRIALS, OPTUNA_TOP_K,
     FORECAST_HORIZON,
 )
+from src.utils.log import get_logger
 
 from darts import TimeSeries
 from darts.models import TiDEModel
 from darts.metrics import mae, rmse, mape as darts_mape
+
+log = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Split fractions
@@ -390,7 +393,7 @@ def write_training_loss(engine, model_version, trial_number, rank_val, work_dir)
 
     csv_path = Path(work_dir) / "logs" / "metrics.csv"
     if not csv_path.exists():
-        print(f"  [loss] metrics.csv not found at {csv_path}, skipping")
+        log.warning("loss_csv_not_found", path=str(csv_path))
         return
 
     rows = []
@@ -422,7 +425,7 @@ def write_training_loss(engine, model_version, trial_number, rank_val, work_dir)
                         val_loss = fval
                 rows.append((epoch_int, train_loss, val_loss))
     except Exception as exc:
-        print(f"  [loss] could not parse {csv_path}: {exc}")
+        log.warning("loss_csv_parse_error", path=str(csv_path), error=str(exc))
         return
 
     if not rows:
@@ -452,7 +455,7 @@ def write_training_loss(engine, model_version, trial_number, rank_val, work_dir)
                 "tl":   tl,
                 "vl":   vl,
             })
-    print(f"  [loss] trial {trial_number}: {len(rows)} epoch rows written")
+    log.info("loss_rows_written", trial_number=trial_number, epoch_rows=len(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -464,15 +467,20 @@ def main():
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     engine = get_engine()
-    print("Loading dataset...")
+    log.info("dataset_loading")
     df = load_dataset(engine)
     n = len(df)
-    print(f"Loaded {n} samples: {df['date'].iloc[0].date()} to {df['date'].iloc[-1].date()}")
+    assert n >= 10, f"Too few FSI samples to train: {n}"
+    log.info("dataset_loaded", n=n,
+             date_from=str(df["date"].iloc[0].date()),
+             date_to=str(df["date"].iloc[-1].date()))
 
     TRAIN_SIZE = int(n * TRAIN_PCT)
     VAL_SIZE   = int(n * VAL_PCT)
     TEST_SIZE  = n - TRAIN_SIZE - VAL_SIZE
-    print(f"Split: {TRAIN_SIZE} train / {VAL_SIZE} val / {TEST_SIZE} test  (70/15/15%)")
+    assert VAL_SIZE >= 1 and TEST_SIZE >= 1, \
+        f"Splits too small: train={TRAIN_SIZE}, val={VAL_SIZE}, test={TEST_SIZE}"
+    log.info("split_sizes", train=TRAIN_SIZE, val=VAL_SIZE, test=TEST_SIZE)
 
     if n < 5:
         raise RuntimeError(f"Need at least 5 samples, got {n}.")
@@ -525,23 +533,27 @@ def main():
         metrics = _eval_metrics(target_val, val_preds)
         _trial_val_preds[trial.number] = val_preds
         _trial_params[trial.number]    = params
-        print(f"  Trial {trial.number}: MAPE_val={metrics['mape']:.4f}")
+        log.info("trial_done", trial=trial.number, mape_val=round(metrics["mape"], 4))
         return metrics["mape"]
 
-    print(f"Running Optuna study ({OPTUNA_N_TRIALS} trials)...")
+    log.info("start... optuna_study", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             n_trials=OPTUNA_N_TRIALS)
     study = optuna.create_study(
         direction="minimize",
         study_name=STUDY_NAME,
     )
     study.optimize(objective, n_trials=OPTUNA_N_TRIALS, show_progress_bar=False)
+    log.info("finish... optuna_study", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             n_trials=OPTUNA_N_TRIALS)
 
     # ── Select top-K trials ──────────────────────────────────────────────────
     completed = [t for t in study.trials if t.value is not None]
     completed.sort(key=lambda t: t.value)
     top_trials = completed[:OPTUNA_TOP_K]
-    print(f"Top {len(top_trials)} trials selected for test evaluation:")
+    log.info("top_k_selected", k=len(top_trials))
     for rank, t in enumerate(top_trials, 1):
-        print(f"  Rank {rank}: trial {t.number}  MAPE_val={t.value:.4f}")
+        log.info("trial_rank", rank=rank, trial=t.number,
+                 mape_val=round(t.value, 4))
 
     # ── Evaluate top-K on TEST ───────────────────────────────────────────────
     eval_results = []
@@ -550,7 +562,7 @@ def main():
         work = str(trials_dir / f"rank_{rank}_eval")
         Path(work).mkdir(parents=True, exist_ok=True)
 
-        print(f"  Evaluating rank {rank} on TEST (retrain on TRAIN+VAL)...")
+        log.info("eval_test_start", rank=rank, trial=trial.number)
         model_eval = _build_model(params, work, f"tide_eval_rank{rank}")
         model_eval.fit(
             series=target_val,  # = target[:TRAIN_SIZE + VAL_SIZE]
@@ -566,11 +578,10 @@ def main():
             TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
         )
         test_metrics = _eval_metrics(target_test, test_preds)
-        print(
-            f"    MAPE_test={test_metrics['mape']:.4f}  "
-            f"MAE={test_metrics['mae']:.4f}  "
-            f"RMSE={test_metrics['rmse']:.4f}"
-        )
+        log.info("eval_test_done", rank=rank, trial=trial.number,
+                 mape_test=round(test_metrics["mape"], 4),
+                 mae=round(test_metrics["mae"], 4),
+                 rmse=round(test_metrics["rmse"], 4))
 
         eval_results.append({
             "rank_val":     rank,
@@ -590,12 +601,13 @@ def main():
     best = min(eval_results, key=lambda x: x["mape_test"])
     best["is_production"] = True
     best_params = best["params"]
-    print(f"Production model: trial {best['trial_number']}  MAPE_test={best['mape_test']:.4f}")
+    log.info("production_model_selected", trial=best["trial_number"],
+             mape_test=round(best["mape_test"], 4))
 
     # ── Train production model on full dataset ───────────────────────────────
     prod_work = str(Path(ARTIFACTS_DIR) / "prod")
     Path(prod_work).mkdir(parents=True, exist_ok=True)
-    print("Training production model on full dataset (TRAIN+VAL+TEST)...")
+    log.info("start... train_production", ts=datetime.now().strftime("%Y/%m/%d %H:%M"))
     model_prod = _build_model(best_params, prod_work, "tide_bapro", progress=True)
     model_prod.fit(
         series=target,
@@ -604,7 +616,8 @@ def main():
         verbose=True,
     )
     model_prod.save(TIDE_MODEL_PATH)
-    print(f"Production model saved: {TIDE_MODEL_PATH}")
+    log.info("finish... train_production", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             path=TIDE_MODEL_PATH)
 
     # ── Version stamp (used by all DB writers below) ──────────────────────────
     model_version = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -617,16 +630,16 @@ def main():
                                        model_version, tnum)
         write_training_predictions(engine, df, res["test_preds"], "test",
                                    model_version, tnum)
-    print(f"Training predictions written (all horizons, {len(eval_results)} trials). "
-          f"Version: {model_version}")
+    log.info("training_predictions_written", trials=len(eval_results),
+             model_version=model_version)
 
     # ── Write Optuna trial results to DB ─────────────────────────────────────
     write_optuna_trials(engine, STUDY_NAME, eval_results, model_version)
-    print(f"Optuna trial results written to DB ({len(eval_results)} rows)")
+    log.info("optuna_trials_written", rows=len(eval_results))
 
     # ── Write finalist models to models table ─────────────────────────────────
     write_models(engine, eval_results, model_version, TRAIN_SIZE, VAL_SIZE, TEST_SIZE)
-    print(f"Finalist models written to models table ({len(eval_results)} rows)")
+    log.info("finalist_models_written", rows=len(eval_results))
 
     # ── Write epoch loss curves to training_loss table ────────────────────────
     for res in eval_results:
@@ -634,7 +647,7 @@ def main():
         tnum  = res["trial_number"]
         work  = str(trials_dir / f"rank_{rank}_eval")
         write_training_loss(engine, model_version, tnum, rank, work)
-    print("Training loss curves written to DB")
+    log.info("training_loss_written")
 
     # ── Save metadata ─────────────────────────────────────────────────────────
     metadata = {
@@ -665,8 +678,9 @@ def main():
     meta_path = Path(ARTIFACTS_DIR) / "metadata.json"
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)
-    print(f"Metadata saved: {meta_path}")
-    print(f"Done. MAPE_val_best={best['mape_val']:.4f}  MAPE_test_prod={best['mape_test']:.4f}")
+    log.info("training_done", meta_path=str(meta_path),
+             mape_val_best=round(best["mape_val"], 4),
+             mape_test_prod=round(best["mape_test"], 4))
 
 
 if __name__ == "__main__":

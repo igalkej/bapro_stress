@@ -10,6 +10,7 @@ Usage:
 """
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -20,6 +21,9 @@ from sentence_transformers import SentenceTransformer
 
 from db.connection import get_engine
 from config import EMBEDDING_MODEL
+from src.utils.log import get_logger
+
+log = get_logger(__name__)
 
 
 def fetch_unembedded_articles(conn):
@@ -68,7 +72,7 @@ def store_embedding(conn, art_id: int, vector: np.ndarray, is_pg: bool):
 
 
 def main():
-    print(f"Loading model: {EMBEDDING_MODEL}")
+    log.info("embed_model_loading", model=EMBEDDING_MODEL)
     model = SentenceTransformer(EMBEDDING_MODEL)
 
     engine = get_engine()
@@ -78,10 +82,11 @@ def main():
         articles = fetch_unembedded_articles(conn)
 
     if not articles:
-        print("All articles already have embeddings. Nothing to do.")
+        log.info("embed_skip", reason="all articles already have embeddings")
         return
 
-    print(f"Encoding {len(articles)} articles...")
+    log.info("start... embed_articles", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             n=len(articles))
     texts = [build_embed_text(row.headline, row.gdelt_themes) for row in articles]
     embeddings = model.encode(texts, show_progress_bar=True, convert_to_numpy=True)
 
@@ -89,11 +94,11 @@ def main():
         for row, vec in zip(articles, embeddings):
             store_embedding(conn, row.id, vec, is_pg)
 
-    print(f"Stored {len(articles)} embeddings in article_embeddings.")
-
     with engine.connect() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM article_embeddings")).scalar()
-    print(f"Total embeddings in DB: {count}")
+
+    log.info("finish... embed_articles", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             stored=len(articles), total_in_db=count)
 
 
 if __name__ == "__main__":

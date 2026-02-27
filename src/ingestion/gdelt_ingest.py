@@ -9,9 +9,9 @@ Usage:
 """
 import argparse
 import json
-import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -23,6 +23,7 @@ from sqlalchemy import text
 
 from config import EMBEDDING_MODEL
 from db.connection import get_engine
+from src.utils.log import get_logger
 
 GDELT_API_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 GDELT_QUERY = (
@@ -32,8 +33,7 @@ GDELT_FIELDS = "title,url,tone,themes,seendate,sourcecountry"
 GDELT_MAXRECORDS = 250
 GDELT_REQUEST_DELAY = 6  # seconds between API calls (GDELT rate limit: ~10 req/min)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def _fetch_gdelt_day(date_str: str, session: requests.Session) -> list[dict]:
@@ -189,6 +189,8 @@ def fetch_and_store_gdelt(date_from: str, date_to: str) -> int:
 
     Returns the number of new article rows inserted.
     """
+    log.info("start... gdelt_ingest", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             date_from=date_from, date_to=date_to)
     engine = get_engine()
     is_pg = not engine.url.drivername.startswith("sqlite")
     model = SentenceTransformer(EMBEDDING_MODEL)
@@ -261,7 +263,8 @@ def fetch_and_store_gdelt(date_from: str, date_to: str) -> int:
 
             time.sleep(GDELT_REQUEST_DELAY)
 
-    log.info("GDELT ingest done. Total new articles: %d", total_new)
+    log.info("finish... gdelt_ingest", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             total_new=total_new)
     return total_new
 
 
@@ -272,7 +275,7 @@ def main():
     args = parser.parse_args()
 
     count = fetch_and_store_gdelt(args.date_from, args.date_to)
-    print(f"Inserted {count} new GDELT articles.")
+    log.info("gdelt_main_done", count=count)
 
 
 if __name__ == "__main__":

@@ -9,8 +9,8 @@ Usage:
     python src/ingestion/historical_backfill.py --date-from 2023-01-01 --date-to 2024-12-31
 """
 import argparse
-import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -19,9 +19,9 @@ import pandas as pd
 
 from src.ingestion.gdelt_ingest import fetch_and_store_gdelt
 from src.ingestion.rss_scraper import fetch_and_store_rss
+from src.utils.log import get_logger
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def run_backfill(date_from: str, date_to: str) -> dict:
@@ -36,7 +36,8 @@ def run_backfill(date_from: str, date_to: str) -> dict:
     total_articles = 0
     errors = []
 
-    log.info("Starting backfill for %d business days (%s to %s)", total_days, date_from, date_to)
+    log.info("start... backfill", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             total_days=total_days, date_from=date_from, date_to=date_to)
 
     for bday in business_days:
         day_str = bday.strftime("%Y-%m-%d")
@@ -65,11 +66,10 @@ def run_backfill(date_from: str, date_to: str) -> dict:
         "total_days": total_days,
         "errors": len(errors),
     }
-    log.info("Backfill complete: %s", summary)
-    if errors:
-        log.warning("Errors encountered on %d day(s):", len(errors))
-        for err in errors:
-            log.warning("  %s", err)
+    log.info("finish... backfill", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             total_articles=total_articles, total_days=total_days, errors=len(errors))
+    for err in errors:
+        log.warning("backfill_day_error", **err)
 
     return summary
 
@@ -81,10 +81,7 @@ def main():
     args = parser.parse_args()
 
     summary = run_backfill(args.date_from, args.date_to)
-    print(
-        f"Backfill done: {summary['total_articles']} new articles over "
-        f"{summary['total_days']} days, {summary['errors']} error(s)."
-    )
+    log.info("backfill_main_done", **summary)
 
 
 if __name__ == "__main__":

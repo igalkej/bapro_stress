@@ -13,7 +13,6 @@ Usage:
     docker compose run --rm app python src/data/update_fsi_daily.py
 """
 import argparse
-import logging
 import sys
 from pathlib import Path
 
@@ -24,9 +23,9 @@ from sqlalchemy import text
 
 from db.connection import get_engine
 from src.data.build_fsi_target import build_fsi
+from src.utils.log import get_logger
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def update_fsi_daily(target_date: str | None = None) -> dict:
@@ -66,8 +65,10 @@ def update_fsi_daily(target_date: str | None = None) -> dict:
         for _, r in df.iterrows():
             conn.execute(upsert_sql, {"d": r["date"], "v": float(r["fsi_value"])})
 
-    log.info("fsi_target updated: %d rows (%s to %s)", len(df), start, end)
-    return {"start": start, "end": end, "rows": len(df)}
+    result = {"start": start, "end": end, "rows": len(df)}
+    assert result["rows"] >= 0
+    log.info("fsi_target_updated", rows=result["rows"], start=start, end=end)
+    return result
 
 
 def main():
@@ -79,9 +80,7 @@ def main():
     args = parser.parse_args()
 
     result = update_fsi_daily(args.date)
-    print(
-        f"FSI updated: {result['rows']} rows from {result['start']} to {result['end']}"
-    )
+    log.info("update_fsi_daily_main_done", **result)
 
 
 if __name__ == "__main__":
