@@ -13,8 +13,8 @@ Usage:
 """
 import argparse
 import json
-import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -23,14 +23,14 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from config import EMBEDDING_MODEL, TIDE_MODEL_PATH, FORECAST_HORIZON
+from config import EMBEDDING_MODEL, TIDE_MODEL_PATH, FORECAST_HORIZON, EMBEDDING_DIM
 from db.connection import get_engine
 from src.ingestion.gdelt_ingest import fetch_and_store_gdelt
 from src.ingestion.rss_scraper import fetch_and_store_rss
 from src.data.update_fsi_daily import update_fsi_daily
+from src.utils.log import get_logger
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def _last_business_day() -> str:
@@ -47,11 +47,10 @@ def _first_forecast_date(context_date: str) -> str:
 
 
 def _prediction_exists(conn, date_str: str) -> bool:
-    """Return True if a daily prediction row already exists for the first forecast date."""
-    first_pred_date = _first_forecast_date(date_str)
+    """Return True if a nowcast already exists for target_date."""
     result = conn.execute(
         text("SELECT COUNT(*) FROM daily_predictions WHERE date = :date"),
-        {"date": first_pred_date},
+        {"date": date_str},
     ).scalar()
     return (result or 0) > 0
 
@@ -140,19 +139,65 @@ def _load_tide_model(model_path: str):
     return model
 
 
-def _run_tide_prediction(
-    context_df: pd.DataFrame, model_path: str
-) -> list[tuple[str, float]]:
-    """Load TiDE model and predict FORECAST_HORIZON steps ahead.
+def _get_last_fsi_date(conn) -> str | None:
+    """Return the most recent date in fsi_target, or None if empty."""
+    row = conn.execute(text("SELECT MAX(date) FROM fsi_target")).fetchone()
+    return str(row[0])[:10] if row and row[0] else None
 
-    Returns list of (date_str, score) for each forecasted business day.
+
+def _get_gap_embeddings(conn, gap_dates: list[str],
+                        is_pg: bool) -> dict[str, list[float]]:
+    """
+    Return mean-pooled embeddings for each gap date (days with articles but
+    no published FSI yet). Falls back to a zero vector if no articles exist.
+    """
+    result: dict[str, list[float]] = {}
+    for d in gap_dates:
+        rows = conn.execute(
+            text(
+                """
+                SELECT ae.embedding FROM article_embeddings ae
+                JOIN articles a ON a.id = ae.id
+                WHERE a.date = :date
+                """
+            ),
+            {"date": d},
+        ).fetchall()
+        if rows:
+            vecs = [
+                json.loads(r[0]) if isinstance(r[0], str) else list(r[0])
+                for r in rows
+            ]
+            result[d] = np.mean(vecs, axis=0).tolist()
+        else:
+            result[d] = [0.0] * EMBEDDING_DIM
+    return result
+
+
+def _run_tide_prediction(
+    context_df: pd.DataFrame,
+    model_path: str,
+    n: int,
+    gap_embeds: dict[str, list[float]],
+) -> list[tuple[str, float]]:
+    """
+    Nowcast FSI for `n` gap days using the TiDE model.
+
+    context_df: FSI + embedding rows for the input_chunk days ending at
+                last_fsi_date (the last date with known FSI).
+    gap_embeds: {date_str: embedding_vector} for each gap day to nowcast.
+                Real article embeddings, NOT zero vectors.
+
+    Returns list of (date_str, score) for each nowcasted date.
     """
     from darts import TimeSeries
+
+    assert n >= 1, f"n must be >= 1 for nowcasting, got {n}"
 
     model = _load_tide_model(model_path)
     input_chunk = model.input_chunk_length
 
-    # Use last input_chunk rows
+    # Use last input_chunk rows (FSI context ending at last_fsi_date)
     ctx = context_df.tail(input_chunk).reset_index(drop=True)
     ctx["date"] = pd.to_datetime(ctx["date"].astype(str).str[:10])
 
@@ -173,16 +218,13 @@ def _run_tide_prediction(
     )
     emb_df["date"] = ctx["date"].values
 
-    # Extend covariates by FORECAST_HORIZON extra business days (zero vectors)
-    # so that future_covariates cover the full prediction window.
-    last_date = pd.Timestamp(ctx["date"].iloc[-1])
-    extra_rows = []
-    for i in range(1, FORECAST_HORIZON + 1):
-        extra_rows.append({
-            **{f"emb_{j}": 0.0 for j in range(emb_dim)},
-            "date": last_date + pd.offsets.BusinessDay(i),
-        })
-    emb_df = pd.concat([emb_df, pd.DataFrame(extra_rows)], ignore_index=True)
+    # Append gap-day embeddings (real article vectors, not zeros)
+    gap_rows = []
+    for d in sorted(gap_embeds):
+        row = {f"emb_{j}": v for j, v in enumerate(gap_embeds[d])}
+        row["date"] = pd.Timestamp(d)
+        gap_rows.append(row)
+    emb_df = pd.concat([emb_df, pd.DataFrame(gap_rows)], ignore_index=True)
 
     cov_series = TimeSeries.from_dataframe(
         emb_df,
@@ -194,14 +236,15 @@ def _run_tide_prediction(
     )
 
     pred = model.predict(
-        n=FORECAST_HORIZON,
+        n=n,
         series=fsi_series,
         past_covariates=cov_series,
         future_covariates=cov_series,
     )
+    last_ctx_date = pd.Timestamp(ctx["date"].iloc[-1])
     pred_dates = pd.bdate_range(
-        start=last_date + pd.offsets.BusinessDay(1),
-        periods=FORECAST_HORIZON,
+        start=last_ctx_date + pd.offsets.BusinessDay(1),
+        periods=n,
     )
     return [
         (d.strftime("%Y-%m-%d"), float(pred.values()[i, 0]))
@@ -242,7 +285,8 @@ def run_daily(target_date: str | None = None) -> dict:
     if target_date is None:
         target_date = _last_business_day()
 
-    log.info("Daily pipeline starting for date: %s", target_date)
+    log.info("start... daily_pipeline", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             target_date=target_date)
 
     engine = get_engine()
     is_pg = not engine.url.drivername.startswith("sqlite")
@@ -250,16 +294,17 @@ def run_daily(target_date: str | None = None) -> dict:
     # Idempotency check
     with engine.connect() as conn:
         if _prediction_exists(conn, target_date):
-            log.info("Prediction already exists for %s. Skipping.", target_date)
-            print(f"Prediction already exists. Skipping.")
+            log.info("daily_pipeline_skipped", reason="prediction_exists",
+                     target_date=target_date)
             return {"date": target_date, "status": "skipped"}
 
     # Refresh FSI target with latest market data (non-fatal if yfinance is down)
     try:
         fsi_result = update_fsi_daily(target_date)
-        log.info("FSI updated: %s", fsi_result)
+        log.info("fsi_refreshed", rows=fsi_result["rows"],
+                 start=fsi_result["start"], end=fsi_result["end"])
     except Exception as exc:
-        log.warning("FSI daily update failed (non-fatal): %s", exc)
+        log.warning("fsi_refresh_failed", reason=str(exc), note="non-fatal")
 
     # Ingest
     gdelt_new = fetch_and_store_gdelt(target_date, target_date)
@@ -274,14 +319,14 @@ def run_daily(target_date: str | None = None) -> dict:
             ).scalar() or 0
         if existing == 0:
             msg = f"No articles found for {target_date}"
-            log.error(msg)
+            log.error("no_articles", date=target_date)
             raise RuntimeError(msg)
-        log.info("No new articles (all already ingested). Proceeding with %d existing.", existing)
+        log.info("articles_already_ingested", date=target_date, count=existing)
 
     # Build prediction context
     model_path = TIDE_MODEL_PATH
     if not Path(model_path).exists():
-        log.warning("TiDE model not found at %s. Skipping prediction.", model_path)
+        log.warning("model_not_found", path=model_path, note="skipping prediction")
         return {
             "date": target_date,
             "gdelt_new": gdelt_new,
@@ -291,22 +336,51 @@ def run_daily(target_date: str | None = None) -> dict:
         }
 
     with engine.connect() as conn:
+        # Compute the nowcast gap: business days with articles but without FSI
+        last_fsi_date = _get_last_fsi_date(conn)
+        assert last_fsi_date is not None, "fsi_target is empty — seed FSI data first"
+
+        gap_dates = pd.bdate_range(
+            pd.Timestamp(last_fsi_date) + pd.offsets.BusinessDay(1),
+            pd.Timestamp(target_date),
+        ).strftime("%Y-%m-%d").tolist()
+
+        if not gap_dates:
+            log.info("nowcast_no_gap", last_fsi_date=last_fsi_date,
+                     target_date=target_date,
+                     note="FSI already covers target_date, nothing to nowcast")
+            return {
+                "date": target_date,
+                "gdelt_new": gdelt_new,
+                "rss_new": rss_new,
+                "stress_score": None,
+                "status": "no_gap",
+            }
+
+        n = len(gap_dates)
+        log.info("nowcast_gap", n=n, gap_from=gap_dates[0], gap_to=gap_dates[-1])
+
         model = _load_tide_model(model_path)
         input_chunk = model.input_chunk_length
         model_version = Path(model_path).stem
 
-        context_df, target_article_ids = _get_context_for_prediction(
-            conn, target_date, input_chunk, is_pg
+        # Context: FSI + embeddings for input_chunk days ending at last_fsi_date
+        context_df, _ = _get_context_for_prediction(
+            conn, last_fsi_date, input_chunk, is_pg
         )
 
+        # Gap embeddings: real article vectors for each day being nowcasted
+        gap_embeds = _get_gap_embeddings(conn, gap_dates, is_pg)
+
     if context_df is None or len(context_df) < input_chunk:
-        msg = f"Not enough context data for prediction (need {input_chunk} days)"
-        log.error(msg)
+        msg = f"Not enough context data for nowcasting (need {input_chunk} days)"
+        log.error("insufficient_context", need=input_chunk,
+                  found=len(context_df) if context_df is not None else 0)
         raise RuntimeError(msg)
 
-    forecasts = _run_tide_prediction(context_df, model_path)
+    forecasts = _run_tide_prediction(context_df, model_path, n, gap_embeds)
     for pred_date, score in forecasts:
-        log.info("Forecast: %s -> %.4f", pred_date, score)
+        log.info("nowcast_score", date=pred_date, score=round(score, 4))
 
     with engine.begin() as conn:
         for pred_date, score in forecasts:
@@ -320,7 +394,10 @@ def run_daily(target_date: str | None = None) -> dict:
         "forecasts": {d: s for d, s in forecasts},
         "status": "ok",
     }
-    log.info("Daily pipeline complete: %s", result)
+    log.info("finish... daily_pipeline", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             target_date=result["date"], status=result.get("status"),
+             gdelt_new=result.get("gdelt_new"), rss_new=result.get("rss_new"),
+             stress_score=result.get("stress_score"))
     return result
 
 
@@ -330,7 +407,8 @@ def main():
     args = parser.parse_args()
 
     result = run_daily(args.date)
-    print(f"Result: {result}")
+    log.info("daily_pipeline_main_done", **{k: v for k, v in result.items()
+                                            if k != "forecasts"})
 
 
 if __name__ == "__main__":

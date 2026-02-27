@@ -15,8 +15,8 @@ Usage:
     python src/data/build_fsi_target.py --start 2023-01-01 --end 2024-12-31
 """
 import argparse
-import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -29,10 +29,10 @@ from sklearn.preprocessing import StandardScaler
 
 from config import FSI_CSV
 from db.connection import get_engine
+from src.utils.log import get_logger
 from sqlalchemy import text as _sa_text
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 # Known stress event for sign validation: PASO 2019 (Aug 12, 2019)
 # This date saw a sharp market crash — FSI should be near its maximum
@@ -104,6 +104,8 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
 
     Returns the resulting DataFrame with columns [date, fsi_value].
     """
+    log.info("start... build_fsi", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             start=start, end=end)
     # Extend start by 60 days to compute rolling vol for early dates
     start_extended = (pd.Timestamp(start) - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
 
@@ -143,8 +145,7 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
     df = df.loc[start:end]
     df = df.dropna()
 
-    if df.empty:
-        raise ValueError("No valid data after alignment and dropna — check tickers and date range")
+    assert not df.empty, "No valid data after alignment and dropna -- check tickers and date range"
 
     log.info("Aligned DataFrame shape: %s", df.shape)
 
@@ -198,7 +199,8 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
     out.columns = ["date", "fsi_value"]
     out["date"] = out["date"].dt.strftime("%Y-%m-%d")
     out.to_csv(FSI_CSV, index=False)
-    log.info("Saved %d rows to %s", len(out), FSI_CSV)
+    log.info("finish... build_fsi", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             rows=len(out), start=out["date"].iloc[0], end=out["date"].iloc[-1])
 
     return out
 
@@ -210,7 +212,8 @@ def main():
     args = parser.parse_args()
 
     df = build_fsi(args.start, args.end)
-    print(f"FSI built: {len(df)} rows from {df['date'].iloc[0]} to {df['date'].iloc[-1]}")
+    log.info("build_fsi_main_done", rows=len(df),
+             start=df["date"].iloc[0], end=df["date"].iloc[-1])
 
 
 if __name__ == "__main__":

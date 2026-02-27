@@ -9,8 +9,8 @@ Usage:
 """
 import argparse
 import json
-import logging
 import sys
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from sqlalchemy import text
 
 from config import EMBEDDING_MODEL
 from db.connection import get_engine
+from src.utils.log import get_logger
 
 RSS_FEEDS = {
     "ambito_rss":   "https://www.ambito.com/rss/economia.xml",
@@ -30,8 +31,7 @@ RSS_FEEDS = {
     "infobae_rss":  "https://www.infobae.com/feeds/rss/economia/",
 }
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 def _parse_pub_date(entry) -> str | None:
@@ -120,6 +120,8 @@ def fetch_and_store_rss(date_from: str, date_to: str) -> int:
 
     Returns the number of new article rows inserted.
     """
+    log.info("start... rss_ingest", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             date_from=date_from, date_to=date_to)
     engine = get_engine()
     is_pg = not engine.url.drivername.startswith("sqlite")
     model = SentenceTransformer(EMBEDDING_MODEL)
@@ -174,7 +176,8 @@ def fetch_and_store_rss(date_from: str, date_to: str) -> int:
         log.info("  Inserted %d new articles from %s", len(new_ids), feed_key)
         total_new += len(new_ids)
 
-    log.info("RSS ingest done. Total new articles: %d", total_new)
+    log.info("finish... rss_ingest", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
+             total_new=total_new)
     return total_new
 
 
@@ -185,7 +188,7 @@ def main():
     args = parser.parse_args()
 
     count = fetch_and_store_rss(args.date_from, args.date_to)
-    print(f"Inserted {count} new RSS articles.")
+    log.info("rss_main_done", count=count)
 
 
 if __name__ == "__main__":

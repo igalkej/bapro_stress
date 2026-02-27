@@ -16,12 +16,16 @@ from sqlalchemy import text
 
 from config import FSI_CSV
 from db.connection import get_engine
+from src.utils.log import get_logger
+
+log = get_logger(__name__)
 
 
 def seed_fsi(conn, is_pg: bool) -> int:
     """Insert rows from fsi_target.csv. Returns count of newly inserted rows."""
     if not FSI_CSV.exists():
-        print(f"fsi_target.csv not found at {FSI_CSV}. Run build_fsi_target.py first.")
+        log.error("fsi_csv_not_found", path=str(FSI_CSV),
+                  hint="Run build_fsi_target.py first")
         return 0
 
     inserted = 0
@@ -57,11 +61,9 @@ def main():
     with engine.begin() as conn:
         count = seed_fsi(conn, is_pg)
 
-    print(f"Seeded {count} FSI rows.")
-
     with engine.connect() as conn:
         total = conn.execute(text("SELECT COUNT(*) FROM fsi_target")).scalar()
-    print(f"Total rows in fsi_target: {total}")
+    log.info("seed_fsi_done", seeded=count, total_in_db=total)
 
 
 if __name__ == "__main__":
