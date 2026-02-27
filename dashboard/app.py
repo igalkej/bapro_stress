@@ -576,15 +576,21 @@ def render_ts_chart(data):
     fig = go.Figure()
 
     # --- Shaded regions (train / val / test) ---
+    # Clip the visible FSI series to the training period only (train+val+test),
+    # so that post-training daily FSI updates do not extend the chart.
     if metadata and len(fsi_df) > 0:
         n = len(fsi_df)
         train_size = metadata.get("train_samples", int(n * 0.70))
         val_size   = metadata.get("val_samples",   int(n * 0.15))
+        test_size  = metadata.get("test_samples",  n - train_size - val_size)
 
-        t_end = fsi_df["date"].iloc[min(train_size - 1, n - 1)]
-        v_end = fsi_df["date"].iloc[min(train_size + val_size - 1, n - 1)]
-        s_start = fsi_df["date"].iloc[0]
-        s_end   = fsi_df["date"].iloc[-1]
+        chart_n   = train_size + val_size + test_size  # rows used at training time
+        train_fsi = fsi_df.iloc[:chart_n].copy()       # clip to training period
+
+        t_end   = fsi_df["date"].iloc[min(train_size - 1, n - 1)]
+        v_end   = fsi_df["date"].iloc[min(train_size + val_size - 1, n - 1)]
+        s_start = train_fsi["date"].iloc[0]
+        s_end   = train_fsi["date"].iloc[-1]   # stops at test-end, not today
 
         for x0, x1, color, label in [
             (s_start, t_end, "rgba(56,139,253,0.07)",  "TRAIN (in-sample)"),
@@ -598,10 +604,12 @@ def render_ts_chart(data):
                 annotation_position="top left",
                 annotation_font={"size": 10, "color": "#8b949e"},
             )
+    else:
+        train_fsi = fsi_df  # fallback: no metadata, show all
 
-    # --- FSI actual ---
+    # --- FSI actual (clipped to training period) ---
     fig.add_trace(go.Scatter(
-        x=fsi_df["date"], y=fsi_df["fsi_value"],
+        x=train_fsi["date"], y=train_fsi["fsi_value"],
         name="FSI Real",
         line={"color": "#388bfd", "width": 2},
         mode="lines",
