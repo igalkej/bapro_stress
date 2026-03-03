@@ -56,17 +56,42 @@ def _download_series(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 OFR_FSI_URL = "https://www.financialresearch.gov/financial-stress-index/data/fsi.csv"
 
 
-def _download_ofr_fsi(start: str, end: str) -> pd.Series:
-    """Download the OFR Financial Stress Index and return as a daily Series."""
+OFR_COL_MAP = {
+    "OFR FSI":                   "ofr_fsi",
+    "Credit":                    "ofr_credit",
+    "Equity valuation":          "ofr_equity",
+    "Safe assets":               "ofr_safe_assets",
+    "Funding":                   "ofr_funding",
+    "Volatility":                "ofr_volatility",
+    "United States":             "ofr_us",
+    "Other advanced economies":  "ofr_other_adv",
+    "Emerging markets":          "ofr_em",
+}
+
+# Sub-indicators used as PCA inputs (composite excluded to avoid multicollinearity)
+OFR_PCA_COLS = [
+    "ofr_credit", "ofr_equity", "ofr_safe_assets", "ofr_funding",
+    "ofr_volatility", "ofr_us", "ofr_other_adv", "ofr_em",
+]
+
+
+def _download_ofr_fsi(start: str, end: str) -> pd.DataFrame:
+    """
+    Download all OFR FSI indicator columns and return as a DataFrame.
+
+    Columns returned: ofr_fsi (composite) + 8 sub-indicators.
+    The composite is stored as reference; sub-indicators feed the PCA.
+    """
     log.info("Downloading OFR FSI from financialresearch.gov")
     try:
-        df = pd.read_csv(OFR_FSI_URL, parse_dates=["Date"], index_col="Date")
-        series = df["OFR FSI"].loc[start:end]
-        if series.empty:
+        raw = pd.read_csv(OFR_FSI_URL, parse_dates=["Date"], index_col="Date")
+        df = raw.rename(columns=OFR_COL_MAP)[list(OFR_COL_MAP.values())]
+        df = df.loc[start:end]
+        if df.empty:
             raise ValueError(f"OFR FSI returned no data for range [{start}, {end}]")
-        log.info("OFR FSI: %d rows (%s to %s)",
-                 len(series), series.index[0].date(), series.index[-1].date())
-        return series
+        log.info("OFR FSI: %d rows (%s to %s), %d indicators",
+                 len(df), df.index[0].date(), df.index[-1].date(), len(df.columns))
+        return df
     except Exception as exc:
         log.error("ofr_fsi_download_failed", reason=str(exc))
         raise
@@ -85,39 +110,29 @@ def _save_components_to_db(components_df: pd.DataFrame) -> None:
     try:
         engine = get_engine()
         is_pg = not engine.url.drivername.startswith("sqlite")
+        data_cols = [c for c in components_df.columns if c != "date"]
+        col_list = ", ".join(data_cols)
+        val_list = ", ".join(f":{c}" for c in data_cols)
+        update_list = ", ".join(f"{c} = EXCLUDED.{c}" for c in data_cols)
+
+        if is_pg:
+            sql = _sa_text(
+                f"INSERT INTO fsi_components (date, {col_list}) "
+                f"VALUES (:date, {val_list}) "
+                f"ON CONFLICT (date) DO UPDATE SET {update_list}"
+            )
+        else:
+            sql = _sa_text(
+                f"INSERT OR REPLACE INTO fsi_components (date, {col_list}) "
+                f"VALUES (:date, {val_list})"
+            )
+
         with engine.begin() as conn:
             for _, row in components_df.iterrows():
-                if is_pg:
-                    sql = _sa_text(
-                        """
-                        INSERT INTO fsi_components
-                            (date, merv_vol, argt_spread, usd_ars, emb_spread, ofr_fsi)
-                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread, :ofr_fsi)
-                        ON CONFLICT (date) DO UPDATE SET
-                            merv_vol    = EXCLUDED.merv_vol,
-                            argt_spread = EXCLUDED.argt_spread,
-                            usd_ars     = EXCLUDED.usd_ars,
-                            emb_spread  = EXCLUDED.emb_spread,
-                            ofr_fsi     = EXCLUDED.ofr_fsi
-                        """
-                    )
-                else:
-                    sql = _sa_text(
-                        """
-                        INSERT OR REPLACE INTO fsi_components
-                            (date, merv_vol, argt_spread, usd_ars, emb_spread, ofr_fsi)
-                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread, :ofr_fsi)
-                        """
-                    )
-                conn.execute(sql, {
-                    "date":        row["date"],
-                    "merv_vol":    float(row["merv_vol"]),
-                    "argt_spread": float(row["argt_spread"]),
-                    "usd_ars":     float(row["usd_ars"]),
-                    "emb_spread":  float(row["emb_spread"]),
-                    "ofr_fsi":     float(row["ofr_fsi"]),
-                })
-        log.info("Saved %d rows to fsi_components", len(components_df))
+                params = {"date": row["date"]}
+                params.update({c: float(row[c]) for c in data_cols})
+                conn.execute(sql, params)
+        log.info("Saved %d rows to fsi_components (%d columns)", len(components_df), len(data_cols))
     except Exception as exc:
         log.warning("Could not save components to DB: %s", exc)
 
@@ -158,17 +173,17 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
     emb = others_raw.get("EMB")
     emb_stress = -emb  # invert
 
-    # --- Component 5: OFR FSI (global stress context, positive = more stress) ---
-    ofr_raw = _download_ofr_fsi(start_extended, end)
+    # --- Components 5-13: OFR FSI sub-indicators + composite (global context) ---
+    ofr_df = _download_ofr_fsi(start_extended, end)
 
     # --- Align to business-day index, forward-fill gaps, trim to [start, end] ---
-    df = pd.DataFrame({
-        "merv_vol": merv_vol,
+    arg_df = pd.DataFrame({
+        "merv_vol":   merv_vol,
         "gd30_stress": gd30_stress,
-        "ars_rate": ars,
+        "ars_rate":   ars,
         "emb_stress": emb_stress,
-        "ofr_fsi": ofr_raw,
     })
+    df = arg_df.join(ofr_df, how="left")
     df = df.resample("B").last().ffill()
     df = df.loc[start:end]
     df = df.dropna()
@@ -177,25 +192,29 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
 
     log.info("Aligned DataFrame shape: %s", df.shape)
 
-    # --- Z-score normalise ---
+    # --- Z-score normalise all columns ---
+    all_cols = list(df.columns)
     scaler = StandardScaler()
-    X = scaler.fit_transform(df)
+    X_all = scaler.fit_transform(df)
 
-    # --- Save normalised components to DB ---
-    components_df = pd.DataFrame(
-        X,
-        index=df.index,
-        columns=["merv_vol", "argt_spread", "usd_ars", "emb_spread", "ofr_fsi"],
-    )
+    # --- Save all normalised components to DB (composite stored as reference) ---
+    db_col_names = ["merv_vol", "argt_spread", "usd_ars", "emb_spread"] + \
+                   [c for c in all_cols if c.startswith("ofr_")]
+    components_df = pd.DataFrame(X_all, index=df.index, columns=db_col_names)
     components_df.index.name = "date"
     components_df = components_df.reset_index()
     components_df["date"] = components_df["date"].dt.strftime("%Y-%m-%d")
     _save_components_to_db(components_df)
 
-    # --- PCA: first component = FSI ---
+    # --- PCA: 4 Argentine + 8 OFR sub-indicators (composite excluded) ---
+    pca_col_names = ["merv_vol", "gd30_stress", "ars_rate", "emb_stress"] + OFR_PCA_COLS
+    pca_indices = [all_cols.index(c) for c in pca_col_names]
+    X_pca = X_all[:, pca_indices]
+
     pca = PCA(n_components=1)
-    fsi_values = pca.fit_transform(X).squeeze()
-    log.info("PCA explained variance ratio: %.3f", pca.explained_variance_ratio_[0])
+    fsi_values = pca.fit_transform(X_pca).squeeze()
+    log.info("PCA explained variance ratio: %.3f (12 inputs: 4 AR + 8 OFR sub-indicators)",
+             pca.explained_variance_ratio_[0])
 
     # --- Sign validation using PASO 2019 ---
     fsi_series = pd.Series(fsi_values, index=df.index, name="fsi_value")

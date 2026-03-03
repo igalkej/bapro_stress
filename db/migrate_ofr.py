@@ -19,28 +19,43 @@ from sqlalchemy import text
 from db.connection import get_engine
 
 
+OFR_COLUMNS = [
+    ("ofr_fsi",         "FLOAT"),  # composite (stored as reference, not used in PCA)
+    ("ofr_credit",      "FLOAT"),
+    ("ofr_equity",      "FLOAT"),
+    ("ofr_safe_assets", "FLOAT"),
+    ("ofr_funding",     "FLOAT"),
+    ("ofr_volatility",  "FLOAT"),
+    ("ofr_us",          "FLOAT"),
+    ("ofr_other_adv",   "FLOAT"),
+    ("ofr_em",          "FLOAT"),
+]
+
+
 def migrate_postgres(conn):
     print("PostgreSQL migration OFR...")
-    conn.execute(text(
-        "ALTER TABLE fsi_components ADD COLUMN IF NOT EXISTS ofr_fsi FLOAT"
-    ))
-    print("  fsi_components.ofr_fsi: OK")
+    for col, dtype in OFR_COLUMNS:
+        conn.execute(text(
+            f"ALTER TABLE fsi_components ADD COLUMN IF NOT EXISTS {col} {dtype}"
+        ))
+        print(f"  fsi_components.{col}: OK")
 
 
 def migrate_sqlite(conn):
     print("SQLite migration OFR...")
-    cols = [
+    existing = {
         row[1] for row in conn.execute(
             text("PRAGMA table_info(fsi_components)")
         ).fetchall()
-    ]
-    if "ofr_fsi" not in cols:
-        conn.execute(text(
-            "ALTER TABLE fsi_components ADD COLUMN ofr_fsi REAL"
-        ))
-        print("  fsi_components.ofr_fsi: OK")
-    else:
-        print("  fsi_components.ofr_fsi already exists: skip")
+    }
+    for col, dtype in OFR_COLUMNS:
+        if col not in existing:
+            conn.execute(text(
+                f"ALTER TABLE fsi_components ADD COLUMN {col} REAL"
+            ))
+            print(f"  fsi_components.{col}: OK")
+        else:
+            print(f"  fsi_components.{col} already exists: skip")
 
 
 def main():

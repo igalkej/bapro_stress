@@ -20,12 +20,20 @@ CREATE TABLE IF NOT EXISTS fsi_target (
 );
 
 CREATE TABLE IF NOT EXISTS fsi_components (
-    date         DATE  NOT NULL UNIQUE,
-    merv_vol     FLOAT,
-    argt_spread  FLOAT,
-    usd_ars      FLOAT,
-    emb_spread   FLOAT,
-    ofr_fsi      FLOAT
+    date              DATE  NOT NULL UNIQUE,
+    merv_vol          FLOAT,
+    argt_spread       FLOAT,
+    usd_ars           FLOAT,
+    emb_spread        FLOAT,
+    ofr_fsi           FLOAT,
+    ofr_credit        FLOAT,
+    ofr_equity        FLOAT,
+    ofr_safe_assets   FLOAT,
+    ofr_funding       FLOAT,
+    ofr_volatility    FLOAT,
+    ofr_us            FLOAT,
+    ofr_other_adv     FLOAT,
+    ofr_em            FLOAT
 );
 
 CREATE TABLE IF NOT EXISTS training_predictions (
