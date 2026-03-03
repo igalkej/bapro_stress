@@ -56,6 +56,8 @@ def load_dataset(engine):
     """
     Join articles + article_embeddings + fsi_target on date.
     Mean-pool embeddings per business day.
+    Only days with real article embeddings are included — days without
+    articles are excluded entirely (no zero-vector fabrication).
     Returns DataFrame: date (datetime), vec (np.array), fsi_value (float).
     """
     with engine.connect() as conn:
@@ -87,16 +89,19 @@ def load_dataset(engine):
         date_vecs.setdefault(date_str, []).append(vec)
 
     mean_vecs = {d: np.mean(vecs, axis=0) for d, vecs in date_vecs.items()}
-    emb_dim   = next(iter(mean_vecs.values())).shape[0] if mean_vecs else 384
-    zero_vec  = np.zeros(emb_dim, dtype=np.float32)
+    fsi_lookup = {str(row[0])[:10]: float(row[1]) for row in fsi_rows}
 
+    # Only include days that have BOTH real FSI and real article embeddings.
+    # Days without articles are excluded — no zero-vector fabrication.
     records = []
-    for row in fsi_rows:
-        date_str = str(row[0])[:10]
+    for date_str, vec in mean_vecs.items():
+        fsi_val = fsi_lookup.get(date_str)
+        if fsi_val is None:
+            continue
         records.append({
             "date":      date_str,
-            "vec":       mean_vecs.get(date_str, zero_vec),
-            "fsi_value": float(row[1]),
+            "vec":       vec,
+            "fsi_value": fsi_val,
         })
 
     if not records:
@@ -112,10 +117,15 @@ def load_dataset(engine):
 # ---------------------------------------------------------------------------
 
 def build_target_series(df):
-    return TimeSeries.from_dataframe(
+    # Build a contiguous business-day series. Since df only contains days with
+    # real articles, fill_missing_dates adds NaN for gap days; ffill carries
+    # the last known FSI forward so TiDE sees a continuous target.
+    ts = TimeSeries.from_dataframe(
         df, time_col="date", value_cols="fsi_value",
         fill_missing_dates=True, freq="B",
     )
+    filled = ts.to_dataframe().ffill().bfill()
+    return TimeSeries.from_dataframe(filled, freq="B")
 
 
 def build_covariate_series(df):
