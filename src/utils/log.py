@@ -35,7 +35,6 @@ def _setup() -> None:
 
     shared_processors = [
         structlog.stdlib.add_log_level,
-        structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="%Y/%m/%d %H:%M:%S", utc=False),
         structlog.processors.StackInfoRenderer(),
     ]
@@ -58,4 +57,4 @@ def _setup() -> None:
 def get_logger(name: str) -> structlog.BoundLogger:
     """Return a structlog logger bound with the given module name."""
     _setup()
-    return structlog.get_logger(name)
+    return structlog.get_logger().bind(logger=name)
