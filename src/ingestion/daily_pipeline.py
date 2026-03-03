@@ -304,7 +304,7 @@ def run_daily(target_date: str | None = None) -> dict:
         log.info("fsi_refreshed", rows=fsi_result["rows"],
                  start=fsi_result["start"], end=fsi_result["end"])
     except Exception as exc:
-        log.warning("fsi_refresh_failed", reason=str(exc), note="non-fatal")
+        log.error("fsi_refresh_failed", reason=str(exc), note="FSI not updated — predictions may use stale data")
 
     # Ingest
     gdelt_new = fetch_and_store_gdelt(target_date, target_date)
@@ -407,8 +407,14 @@ def main():
     args = parser.parse_args()
 
     result = run_daily(args.date)
-    log.info("daily_pipeline_main_done", **{k: v for k, v in result.items()
-                                            if k != "forecasts"})
+    status = result.get("status")
+    summary = {k: v for k, v in result.items() if k != "forecasts"}
+    if status == "no_model":
+        log.critical("daily_pipeline_main_done", **summary)
+    elif status not in ("ok", "skipped", "no_gap"):
+        log.error("daily_pipeline_main_done", **summary)
+    else:
+        log.info("daily_pipeline_main_done", **summary)
 
 
 if __name__ == "__main__":

@@ -136,7 +136,7 @@ def fetch_and_store_rss(date_from: str, date_to: str) -> int:
         try:
             parsed = feedparser.parse(feed_url)
         except Exception as exc:
-            log.warning("Failed to parse %s: %s", feed_key, exc)
+            log.error("feed_parse_failed", feed=feed_key, url=feed_url, reason=str(exc))
             continue
 
         entries_in_range = []
@@ -155,7 +155,10 @@ def fetch_and_store_rss(date_from: str, date_to: str) -> int:
                 continue
             entries_in_range.append((pub_date_str, url, headline))
 
-        log.info("  %d entries in range [%s, %s]", len(entries_in_range), date_from, date_to)
+        if len(entries_in_range) == 0:
+            log.warning("feed_no_entries", feed=feed_key, date_from=date_from, date_to=date_to)
+        else:
+            log.info("  %d entries in range [%s, %s]", len(entries_in_range), date_from, date_to)
 
         new_ids = []
         new_headlines = []
