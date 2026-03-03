@@ -19,7 +19,6 @@ ARTIFACTS_DIR = os.getenv("ARTIFACTS_DIR", str(_REPO_ROOT / "artifacts"))
 TIDE_MODEL_PATH = os.getenv("TIDE_MODEL_PATH", str(_REPO_ROOT / "artifacts" / "tide_model.pt"))
 
 LOGS_DIR = Path(os.getenv("LOGS_DIR", str(_REPO_ROOT / "logs")))
-FSI_CSV = _REPO_ROOT / "data" / "fsi_target.csv"
 
 # TiDE model hyperparameters (fixed)
 FORECAST_HORIZON = int(os.getenv("FORECAST_HORIZON", "4"))

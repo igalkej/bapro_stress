@@ -83,23 +83,20 @@ docker compose build && docker compose up -d postgres
 docker compose run --rm app python src/data/build_fsi_target.py \
     --start 2025-11-01 --end 2026-02-24
 
-# 3. Seed FSI into DB
-docker compose run --rm app python db/seed_fsi.py
-
-# 4. Ingest historical articles
+# 3. Ingest historical articles
 docker compose run --rm app python src/ingestion/historical_backfill.py \
     --date-from 2025-11-01 --date-to 2026-02-24
 
-# 5. Embed articles
+# 4. Embed articles
 docker compose run --rm app python training/embed.py
 
-# 6. Train model (with Optuna search)
+# 5. Train model (with Optuna search)
 docker compose run --rm app python training/train.py
 
-# 7. Run daily prediction
+# 6. Run daily prediction
 docker compose run --rm app python src/ingestion/daily_pipeline.py
 
-# 8. Start dashboard
+# 7. Start dashboard
 docker compose up -d dashboard
 # → http://localhost:8050
 ```
@@ -108,7 +105,6 @@ docker compose up -d dashboard
 
 ```bash
 .braprostress_venv/Scripts/python.exe src/data/build_fsi_target.py --start ... --end ...
-.braprostress_venv/Scripts/python.exe db/seed_fsi.py
 .braprostress_venv/Scripts/python.exe src/ingestion/historical_backfill.py --date-from ... --date-to ...
 .braprostress_venv/Scripts/python.exe training/embed.py
 .braprostress_venv/Scripts/python.exe training/train.py

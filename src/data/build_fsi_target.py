@@ -4,7 +4,7 @@ Build the Financial Stress Index (FSI) target from market data.
 Uses yfinance to download four Argentine market proxy series plus the OFR
 Financial Stress Index (global context), z-scores each, applies PCA to
 extract the first principal component, validates sign using PASO 2019 as
-a known stress peak, and saves the result to data/fsi_target.csv.
+a known stress peak, and writes results directly to the database.
 
 Components:
   ^MERV   - Merval index 30-day rolling volatility (primary stress signal)
@@ -29,7 +29,6 @@ import yfinance as yf
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from config import FSI_CSV
 from db.connection import get_engine
 from src.utils.log import get_logger
 from sqlalchemy import text as _sa_text
@@ -137,10 +136,33 @@ def _save_components_to_db(components_df: pd.DataFrame) -> None:
         log.warning("Could not save components to DB: %s", exc)
 
 
+def _save_fsi_to_db(fsi_df: pd.DataFrame) -> None:
+    """Upsert [date, fsi_value] rows into the fsi_target table."""
+    try:
+        engine = get_engine()
+        is_pg = not engine.url.drivername.startswith("sqlite")
+        if is_pg:
+            sql = _sa_text(
+                "INSERT INTO fsi_target (date, fsi_value) VALUES (:date, :v) "
+                "ON CONFLICT (date) DO UPDATE SET fsi_value = EXCLUDED.fsi_value"
+            )
+        else:
+            sql = _sa_text(
+                "INSERT OR REPLACE INTO fsi_target (date, fsi_value) VALUES (:date, :v)"
+            )
+        with engine.begin() as conn:
+            for _, row in fsi_df.iterrows():
+                conn.execute(sql, {"date": row["date"], "v": float(row["fsi_value"])})
+        log.info("Saved %d rows to fsi_target", len(fsi_df))
+    except Exception as exc:
+        log.warning("Could not save FSI to DB: %s", exc)
+
+
 def build_fsi(start: str, end: str) -> pd.DataFrame:
     """
-    Download market data, run PCA, save data/fsi_target.csv.
+    Download market data, run PCA, write results to DB.
 
+    Upserts fsi_components and fsi_target tables directly from memory.
     Returns the resulting DataFrame with columns [date, fsi_value].
     """
     log.info("start... build_fsi", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
@@ -240,12 +262,11 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
         else:
             log.info("PASO FSI value %.3f >= 90th pct (%.3f) -- sign OK", paso_fsi, p90)
 
-    # --- Save to CSV ---
-    FSI_CSV.parent.mkdir(parents=True, exist_ok=True)
+    # --- Save to DB ---
     out = fsi_series.reset_index()
     out.columns = ["date", "fsi_value"]
     out["date"] = out["date"].dt.strftime("%Y-%m-%d")
-    out.to_csv(FSI_CSV, index=False)
+    _save_fsi_to_db(out)
     log.info("finish... build_fsi", ts=datetime.now().strftime("%Y/%m/%d %H:%M"),
              rows=len(out), start=out["date"].iloc[0], end=out["date"].iloc[-1])
 

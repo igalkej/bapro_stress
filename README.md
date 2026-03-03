@@ -26,8 +26,7 @@ docker compose build && docker compose up -d postgres
 docker compose run --rm app python src/data/build_fsi_target.py \
     --start 2025-11-01 --end 2026-02-27
 
-# 3. Seed FSI and ingest historical articles
-docker compose run --rm app python db/seed_fsi.py
+# 3. Ingest historical articles
 docker compose run --rm app python src/ingestion/historical_backfill.py \
     --date-from 2025-11-01 --date-to 2026-02-27
 
@@ -59,7 +58,6 @@ bapro_stress/
 ├── db/
 │   ├── connection.py                # get_engine() — SQLite auto-schema
 │   ├── schema.sql                   # PostgreSQL schema
-│   └── seed_fsi.py                  # Load fsi_target.csv into DB
 ├── src/
 │   ├── data/
 │   │   ├── build_fsi_target.py      # Compute FSI via yfinance + PCA

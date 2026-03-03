@@ -72,7 +72,7 @@ def load_dataset(engine):
         ).fetchall()
 
     if not fsi_rows:
-        raise RuntimeError("fsi_target table is empty. Run seed_fsi first.")
+        raise RuntimeError("fsi_target table is empty. Run build_fsi_target.py first.")
     if not emb_rows:
         raise RuntimeError("article_embeddings table is empty. Run embed first.")
 
