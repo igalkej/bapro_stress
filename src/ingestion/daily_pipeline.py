@@ -326,7 +326,7 @@ def run_daily(target_date: str | None = None) -> dict:
     # Build prediction context
     model_path = TIDE_MODEL_PATH
     if not Path(model_path).exists():
-        log.warning("model_not_found", path=model_path, note="skipping prediction")
+        log.critical("model_not_found", path=model_path, note="no prediction produced — human action required")
         return {
             "date": target_date,
             "gdelt_new": gdelt_new,
