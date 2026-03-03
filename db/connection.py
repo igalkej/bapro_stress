@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS fsi_components (
     merv_vol    REAL,
     argt_spread REAL,
     usd_ars     REAL,
-    emb_spread  REAL
+    emb_spread  REAL,
+    ofr_fsi     REAL
 );
 
 CREATE TABLE IF NOT EXISTS training_predictions (

@@ -1,15 +1,17 @@
 """
 Build the Financial Stress Index (FSI) target from market data.
 
-Uses yfinance to download four proxy series, z-scores each, applies PCA
-to extract the first principal component, validates sign using PASO 2019
-as a known stress peak, and saves the result to data/fsi_target.csv.
+Uses yfinance to download four Argentine market proxy series plus the OFR
+Financial Stress Index (global context), z-scores each, applies PCA to
+extract the first principal component, validates sign using PASO 2019 as
+a known stress peak, and saves the result to data/fsi_target.csv.
 
 Components:
   ^MERV   - Merval index 30-day rolling volatility (primary stress signal)
   GD30.BA - GD30 bond price inverted (sovereign debt stress proxy)
   ARS=X   - USD/ARS exchange rate (FX pressure proxy)
   EMB     - iShares EM Bond ETF inverted (EM stress proxy)
+  OFR FSI - OFR Financial Stress Index (global context, financialresearch.gov)
 
 Usage:
     python src/data/build_fsi_target.py --start 2023-01-01 --end 2024-12-31
@@ -51,6 +53,25 @@ def _download_series(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     return prices
 
 
+OFR_FSI_URL = "https://www.financialresearch.gov/financial-stress-index/data/fsi.csv"
+
+
+def _download_ofr_fsi(start: str, end: str) -> pd.Series:
+    """Download the OFR Financial Stress Index and return as a daily Series."""
+    log.info("Downloading OFR FSI from financialresearch.gov")
+    try:
+        df = pd.read_csv(OFR_FSI_URL, parse_dates=["Date"], index_col="Date")
+        series = df["OFR FSI"].loc[start:end]
+        if series.empty:
+            raise ValueError(f"OFR FSI returned no data for range [{start}, {end}]")
+        log.info("OFR FSI: %d rows (%s to %s)",
+                 len(series), series.index[0].date(), series.index[-1].date())
+        return series
+    except Exception as exc:
+        log.error("ofr_fsi_download_failed", reason=str(exc))
+        raise
+
+
 def _zscore(series: pd.Series) -> pd.Series:
     """Z-score normalise a series, dropping NaN first."""
     clean = series.dropna()
@@ -69,21 +90,23 @@ def _save_components_to_db(components_df: pd.DataFrame) -> None:
                 if is_pg:
                     sql = _sa_text(
                         """
-                        INSERT INTO fsi_components (date, merv_vol, argt_spread, usd_ars, emb_spread)
-                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread)
+                        INSERT INTO fsi_components
+                            (date, merv_vol, argt_spread, usd_ars, emb_spread, ofr_fsi)
+                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread, :ofr_fsi)
                         ON CONFLICT (date) DO UPDATE SET
                             merv_vol    = EXCLUDED.merv_vol,
                             argt_spread = EXCLUDED.argt_spread,
                             usd_ars     = EXCLUDED.usd_ars,
-                            emb_spread  = EXCLUDED.emb_spread
+                            emb_spread  = EXCLUDED.emb_spread,
+                            ofr_fsi     = EXCLUDED.ofr_fsi
                         """
                     )
                 else:
                     sql = _sa_text(
                         """
                         INSERT OR REPLACE INTO fsi_components
-                            (date, merv_vol, argt_spread, usd_ars, emb_spread)
-                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread)
+                            (date, merv_vol, argt_spread, usd_ars, emb_spread, ofr_fsi)
+                        VALUES (:date, :merv_vol, :argt_spread, :usd_ars, :emb_spread, :ofr_fsi)
                         """
                     )
                 conn.execute(sql, {
@@ -92,6 +115,7 @@ def _save_components_to_db(components_df: pd.DataFrame) -> None:
                     "argt_spread": float(row["argt_spread"]),
                     "usd_ars":     float(row["usd_ars"]),
                     "emb_spread":  float(row["emb_spread"]),
+                    "ofr_fsi":     float(row["ofr_fsi"]),
                 })
         log.info("Saved %d rows to fsi_components", len(components_df))
     except Exception as exc:
@@ -134,12 +158,16 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
     emb = others_raw.get("EMB")
     emb_stress = -emb  # invert
 
+    # --- Component 5: OFR FSI (global stress context, positive = more stress) ---
+    ofr_raw = _download_ofr_fsi(start_extended, end)
+
     # --- Align to business-day index, forward-fill gaps, trim to [start, end] ---
     df = pd.DataFrame({
         "merv_vol": merv_vol,
         "gd30_stress": gd30_stress,
         "ars_rate": ars,
         "emb_stress": emb_stress,
+        "ofr_fsi": ofr_raw,
     })
     df = df.resample("B").last().ffill()
     df = df.loc[start:end]
@@ -157,7 +185,7 @@ def build_fsi(start: str, end: str) -> pd.DataFrame:
     components_df = pd.DataFrame(
         X,
         index=df.index,
-        columns=["merv_vol", "argt_spread", "usd_ars", "emb_spread"],
+        columns=["merv_vol", "argt_spread", "usd_ars", "emb_spread", "ofr_fsi"],
     )
     components_df.index.name = "date"
     components_df = components_df.reset_index()

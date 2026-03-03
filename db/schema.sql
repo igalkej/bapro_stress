@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS fsi_components (
     merv_vol     FLOAT,
     argt_spread  FLOAT,
     usd_ars      FLOAT,
-    emb_spread   FLOAT
+    emb_spread   FLOAT,
+    ofr_fsi      FLOAT
 );
 
 CREATE TABLE IF NOT EXISTS training_predictions (
