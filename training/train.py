@@ -494,14 +494,11 @@ def main():
     nan_mask = target.to_dataframe().isna().any(axis=1)
     if nan_mask.any():
         missing = nan_mask[nan_mask].index.strftime("%Y-%m-%d").tolist()
-        log.error("training_target_has_gaps",
-                  count=len(missing), dates=missing,
-                  note="business days with no articles — check ingestion for these dates")
-        raise RuntimeError(
-            f"FSI target has {len(missing)} business day(s) with no articles: "
-            f"{missing[:5]}{'...' if len(missing) > 5 else ''}. "
-            f"Fix ingestion for those dates before training."
-        )
+        log.warning("training_target_gaps_filled",
+                    count=len(missing), dates=missing,
+                    note="business days with no articles (GDELT gap or ingestion failure) — filled via ffill")
+        target_df = target.to_dataframe().ffill().bfill()
+        target = TimeSeries.from_dataframe(target_df, fill_missing_dates=False, freq="B")
     covariates = build_covariate_series(df)
 
     target_train = target[:TRAIN_SIZE]
