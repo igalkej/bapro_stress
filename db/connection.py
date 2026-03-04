@@ -24,11 +24,20 @@ CREATE TABLE IF NOT EXISTS fsi_target (
 );
 
 CREATE TABLE IF NOT EXISTS fsi_components (
-    date        TEXT NOT NULL UNIQUE,
-    merv_vol    REAL,
-    argt_spread REAL,
-    usd_ars     REAL,
-    emb_spread  REAL
+    date            TEXT NOT NULL UNIQUE,
+    merv_vol        REAL,
+    argt_spread     REAL,
+    usd_ars         REAL,
+    emb_spread      REAL,
+    ofr_fsi         REAL,
+    ofr_credit      REAL,
+    ofr_equity      REAL,
+    ofr_safe_assets REAL,
+    ofr_funding     REAL,
+    ofr_volatility  REAL,
+    ofr_us          REAL,
+    ofr_other_adv   REAL,
+    ofr_em          REAL
 );
 
 CREATE TABLE IF NOT EXISTS training_predictions (

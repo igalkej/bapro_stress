@@ -1368,7 +1368,7 @@ def render_fsi_history_chart(tab):
     daily_df = pd.DataFrame(data["daily_preds"])
 
     if fsi_df.empty:
-        return _empty_fig("Sin datos FSI — ejecutar build_fsi_target.py y seed_fsi.py"), [], None
+        return _empty_fig("Sin datos FSI — ejecutar build_fsi_target.py"), [], None
 
     fsi_df["date"] = pd.to_datetime(fsi_df["date"])
 
