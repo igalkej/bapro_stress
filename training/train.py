@@ -539,10 +539,11 @@ def main():
             val_future_covariates=cov_full,
             verbose=False,
         )
-        # Lag offset avoids look-back leakage; capped so at least 1 window fits.
+        # Lag offset avoids look-back leakage; capped so at least 1 window fits
+        # (each window needs forecast_horizon steps ahead of start).
         val_start = min(
             TRAIN_SIZE + params["input_chunk_length"],
-            TRAIN_SIZE + VAL_SIZE - 1,
+            TRAIN_SIZE + VAL_SIZE - FORECAST_HORIZON,
         )
         val_preds = _historical_forecasts(
             model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE],
@@ -593,7 +594,7 @@ def main():
         )
         test_start = min(
             TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
-            len(target_test) - 1,
+            len(target_test) - FORECAST_HORIZON,
         )
         test_preds = _historical_forecasts(
             model_eval, target_test, cov_full,
