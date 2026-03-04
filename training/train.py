@@ -193,6 +193,7 @@ def _historical_forecasts(model, target, covariates, start):
         stride=1,
         retrain=False,
         last_points_only=False,
+        overlap_end=True,
         verbose=False,
     )
 
@@ -501,10 +502,32 @@ def main():
         target = TimeSeries.from_dataframe(target_df, fill_missing_dates=False, freq="B")
     covariates = build_covariate_series(df)
 
-    target_train = target[:TRAIN_SIZE]
-    target_val   = target[:TRAIN_SIZE + VAL_SIZE]
+    # Slice by actual article-day calendar dates, not by integer position.
+    # target[:N] takes the first N *business-day* steps of the filled series,
+    # which is wrong when article days are concentrated in a short window after
+    # a multi-month gap (e.g. Dec articles + Jan gap + Feb articles).
+    from pandas.tseries.offsets import BDay as _BDay
+    _train_end = pd.Timestamp(df["date"].iloc[TRAIN_SIZE - 1])
+    _val_end   = pd.Timestamp(df["date"].iloc[TRAIN_SIZE + VAL_SIZE - 1])
+
+    target_train = target.drop_after(_train_end + _BDay(1))
+    target_val   = target.drop_after(_val_end + _BDay(1))
     target_test  = target
-    cov_full     = covariates
+
+    # Extend covariates by FORECAST_HORIZON extra business days (zero vectors)
+    # so that overlap_end=True rolling windows can complete their full horizon
+    # even when the last window starts near the series end.
+    _last_art_date = pd.Timestamp(df["date"].iloc[-1])
+    _ext_idx = pd.bdate_range(_last_art_date + _BDay(1),
+                               _last_art_date + _BDay(FORECAST_HORIZON))
+    _dim = covariates.width
+    _ext_df = pd.DataFrame(0.0, index=_ext_idx,
+                            columns=[f"emb_{i}" for i in range(_dim)])
+    _cov_df_ext = pd.concat([covariates.to_dataframe(), _ext_df])
+    cov_full  = TimeSeries.from_dataframe(_cov_df_ext, fill_missing_dates=False,
+                                          freq="B")
+    cov_train = cov_full.drop_after(_train_end + _BDay(1))
+    cov_val   = cov_full.drop_after(_val_end + _BDay(1))
 
     Path(ARTIFACTS_DIR).mkdir(parents=True, exist_ok=True)
     trials_dir = Path(ARTIFACTS_DIR) / "optuna_trials"
@@ -532,22 +555,21 @@ def main():
         model = _build_model(params, work, f"tide_trial_{trial.number}")
         model.fit(
             series=target_train,
-            past_covariates=cov_full[:TRAIN_SIZE],
-            future_covariates=cov_full[:TRAIN_SIZE],
+            past_covariates=cov_train,
+            future_covariates=cov_train,
             val_series=target_val,
-            val_past_covariates=cov_full,
-            val_future_covariates=cov_full,
+            val_past_covariates=cov_val,
+            val_future_covariates=cov_val,
             verbose=False,
         )
-        # Lag offset avoids look-back leakage; capped so at least 1 window fits
-        # (each window needs forecast_horizon steps ahead of start).
-        val_start = min(
-            TRAIN_SIZE + params["input_chunk_length"],
-            TRAIN_SIZE + VAL_SIZE - FORECAST_HORIZON,
-        )
+        # Start val rolling window at the first val article day (timestamp).
+        # Darts historical_forecasts accepts pd.Timestamp as start parameter.
+        # Use cov_full so future covariates are available beyond target_val's end
+        # (overlap_end=True allows predictions beyond the series boundary).
+        _val_start_ts = pd.Timestamp(df["date"].iloc[TRAIN_SIZE])
         val_preds = _historical_forecasts(
-            model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE],
-            val_start,
+            model, target_val, cov_full,
+            _val_start_ts,
         )
         metrics = _eval_metrics(target_val, val_preds)
         _trial_val_preds[trial.number] = val_preds
@@ -584,21 +606,19 @@ def main():
         log.info("eval_test_start", rank=rank, trial=trial.number)
         model_eval = _build_model(params, work, f"tide_eval_rank{rank}")
         model_eval.fit(
-            series=target_val,  # = target[:TRAIN_SIZE + VAL_SIZE]
-            past_covariates=cov_full[:TRAIN_SIZE + VAL_SIZE],
-            future_covariates=cov_full[:TRAIN_SIZE + VAL_SIZE],
+            series=target_val,
+            past_covariates=cov_val,
+            future_covariates=cov_val,
             val_series=target_test,
             val_past_covariates=cov_full,
             val_future_covariates=cov_full,
             verbose=False,
         )
-        test_start = min(
-            TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
-            len(target_test) - FORECAST_HORIZON,
-        )
+        # Start test rolling window at the first test article day (timestamp).
+        _test_start_ts = pd.Timestamp(df["date"].iloc[TRAIN_SIZE + VAL_SIZE])
         test_preds = _historical_forecasts(
             model_eval, target_test, cov_full,
-            test_start,
+            _test_start_ts,
         )
         test_metrics = _eval_metrics(target_test, test_preds)
         log.info("eval_test_done", rank=rank, trial=trial.number,
@@ -680,6 +700,14 @@ def main():
         "test_samples":    TEST_SIZE,
         "training_start_date": df["date"].iloc[0].strftime("%Y-%m-%d"),
         "training_end_date":   df["date"].iloc[-1].strftime("%Y-%m-%d"),
+        "split_dates": {
+            "train_start": df["date"].iloc[0].strftime("%Y-%m-%d"),
+            "train_end":   df["date"].iloc[TRAIN_SIZE - 1].strftime("%Y-%m-%d"),
+            "val_start":   df["date"].iloc[TRAIN_SIZE].strftime("%Y-%m-%d"),
+            "val_end":     df["date"].iloc[TRAIN_SIZE + VAL_SIZE - 1].strftime("%Y-%m-%d"),
+            "test_start":  df["date"].iloc[TRAIN_SIZE + VAL_SIZE].strftime("%Y-%m-%d"),
+            "test_end":    df["date"].iloc[-1].strftime("%Y-%m-%d"),
+        },
         # Primary metrics (MAPE)
         "mape_val_best":   best["mape_val"],
         "mape_test_prod":  best["mape_test"],

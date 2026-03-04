@@ -652,17 +652,13 @@ def render_ts_chart(data, base_year_active, base_year):
     else:
         train_fsi = fsi_df.copy()
 
-    if has_preds and not train_fsi.empty:
-        if pred_df.dtypes.get("date") != "datetime64[ns]":
-            pred_df["date"] = pd.to_datetime(pred_df["date"])
-        val_dates  = pred_df[pred_df["split"] == "val"]["date"]
-        test_dates = pred_df[pred_df["split"] == "test"]["date"]
-        s_start = train_fsi["date"].iloc[0]
-        s_end   = train_fsi["date"].iloc[-1]
-        t_end_shade = val_dates.min()  if not val_dates.empty  else s_end
-        v_end_shade = test_dates.min() if not test_dates.empty else (
-            val_dates.max() if not val_dates.empty else s_end
-        )
+    splits = metadata.get("split_dates", {}) if metadata else {}
+    if splits and not train_fsi.empty:
+        # Use exact article-day boundaries stored in metadata at training time.
+        s_start     = pd.Timestamp(splits["train_start"])
+        t_end_shade = pd.Timestamp(splits["val_start"])    # TRAIN ends, VAL begins
+        v_end_shade = pd.Timestamp(splits["test_start"])   # VAL ends, TEST begins
+        s_end       = pd.Timestamp(splits["test_end"])
         for x0, x1, color, label in [
             (s_start,      t_end_shade, "rgba(56,139,253,0.07)",  "TRAIN (in-sample)"),
             (t_end_shade,  v_end_shade, "rgba(240,180,41,0.10)",  "VAL"),
