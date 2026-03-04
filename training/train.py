@@ -539,9 +539,14 @@ def main():
             val_future_covariates=cov_full,
             verbose=False,
         )
+        # Lag offset avoids look-back leakage; capped so at least 1 window fits.
+        val_start = min(
+            TRAIN_SIZE + params["input_chunk_length"],
+            TRAIN_SIZE + VAL_SIZE - 1,
+        )
         val_preds = _historical_forecasts(
             model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE],
-            TRAIN_SIZE + params["input_chunk_length"],
+            val_start,
         )
         metrics = _eval_metrics(target_val, val_preds)
         _trial_val_preds[trial.number] = val_preds
@@ -586,9 +591,13 @@ def main():
             val_future_covariates=cov_full,
             verbose=False,
         )
+        test_start = min(
+            TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
+            len(target_test) - 1,
+        )
         test_preds = _historical_forecasts(
             model_eval, target_test, cov_full,
-            TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
+            test_start,
         )
         test_metrics = _eval_metrics(target_test, test_preds)
         log.info("eval_test_done", rank=rank, trial=trial.number,
