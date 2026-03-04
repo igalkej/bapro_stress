@@ -678,6 +678,8 @@ def main():
         "train_samples":   TRAIN_SIZE,
         "val_samples":     VAL_SIZE,
         "test_samples":    TEST_SIZE,
+        "training_start_date": df["date"].iloc[0].strftime("%Y-%m-%d"),
+        "training_end_date":   df["date"].iloc[-1].strftime("%Y-%m-%d"),
         # Primary metrics (MAPE)
         "mape_val_best":   best["mape_val"],
         "mape_test_prod":  best["mape_test"],

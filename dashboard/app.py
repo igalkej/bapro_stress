@@ -425,6 +425,27 @@ _TAB_SELECTED = {"color": "#e6edf3", "backgroundColor": "#0d1117",
 def _history_layout():
     return html.Div(children=[
         # --- 1. Training time-series chart ---
+        html.Div(
+            style={"display": "flex", "gap": "12px", "alignItems": "center", "marginBottom": "8px"},
+            children=[
+                dcc.Checklist(
+                    id="train-base-year-check",
+                    options=[{"label": " Indice 100 (ano base)", "value": "on"}],
+                    value=[],
+                    style={"color": "#e6edf3", "fontSize": "13px"},
+                    inputStyle={"marginRight": "4px"},
+                ),
+                dcc.Dropdown(
+                    id="train-base-year-select",
+                    options=[{"label": str(y), "value": str(y)} for y in range(2017, 2027)],
+                    value="2020",
+                    clearable=False,
+                    style={"width": "110px", "backgroundColor": "#161b22",
+                           "color": "#e6edf3", "border": "1px solid #30363d"},
+                    className="dark-dropdown",
+                ),
+            ],
+        ),
         dcc.Graph(id="ts-chart", style={"height": "420px"}),
 
         # --- 2. Date selector (for article viewer) ---
@@ -497,6 +518,27 @@ def _history_layout():
 def _predict_layout():
     return html.Div(children=[
         # --- FSI history chart with range selector ---
+        html.Div(
+            style={"display": "flex", "gap": "12px", "alignItems": "center", "marginBottom": "8px"},
+            children=[
+                dcc.Checklist(
+                    id="predict-base-year-check",
+                    options=[{"label": " Indice 100 (ano base)", "value": "on"}],
+                    value=[],
+                    style={"color": "#e6edf3", "fontSize": "13px"},
+                    inputStyle={"marginRight": "4px"},
+                ),
+                dcc.Dropdown(
+                    id="predict-base-year-select",
+                    options=[{"label": str(y), "value": str(y)} for y in range(2017, 2027)],
+                    value="2020",
+                    clearable=False,
+                    style={"width": "110px", "backgroundColor": "#161b22",
+                           "color": "#e6edf3", "border": "1px solid #30363d"},
+                    className="dark-dropdown",
+                ),
+            ],
+        ),
         dcc.Graph(id="fsi-history-chart", style={"height": "380px"}),
 
         # --- Date selector ---
@@ -560,8 +602,10 @@ def _empty_fig(msg="Sin datos — ejecutar el pipeline primero"):
     Output("date-dropdown", "options"),
     Output("date-dropdown", "value"),
     Input("history-store", "data"),
+    Input("train-base-year-check", "value"),
+    Input("train-base-year-select", "value"),
 )
-def render_ts_chart(data):
+def render_ts_chart(data, base_year_active, base_year):
     if not data or not data.get("fsi"):
         return _empty_fig(), [], None
 
@@ -573,29 +617,56 @@ def render_ts_chart(data):
 
     _, metadata = load_artifacts()
 
+    # --- Index-100 transformation ---
+    base_active = "on" in (base_year_active or [])
+    y_title = "FSI"
+    fsi_divisor = None
+    if base_active and base_year:
+        year_mask = fsi_df["date"].dt.year == int(base_year)
+        year_vals = fsi_df.loc[year_mask, "fsi_value"]
+        if not year_vals.empty and abs(year_vals.mean()) > 0.1:
+            fsi_divisor = year_vals.mean()
+            y_title = f"Indice FSI (base {base_year}=100)"
+
+    def _to_idx(vals):
+        if fsi_divisor is not None:
+            return (vals / fsi_divisor) * 100
+        return vals
+
     fig = go.Figure()
 
     # --- Shaded regions (train / val / test) ---
-    # Clip the visible FSI series to the training period only (train+val+test),
-    # so that post-training daily FSI updates do not extend the chart.
-    if metadata and len(fsi_df) > 0:
-        n = len(fsi_df)
-        train_size = metadata.get("train_samples", int(n * 0.70))
-        val_size   = metadata.get("val_samples",   int(n * 0.15))
-        test_size  = metadata.get("test_samples",  n - train_size - val_size)
+    # Clip to actual training date range using metadata (avoids index-based mismatch).
+    if metadata and metadata.get("training_start_date"):
+        t_start = pd.Timestamp(metadata["training_start_date"])
+        t_end_ts = pd.Timestamp(metadata["training_end_date"])
+        train_fsi = fsi_df[
+            (fsi_df["date"] >= t_start) & (fsi_df["date"] <= t_end_ts)
+        ].copy()
+    elif has_preds:
+        pred_df["date"] = pd.to_datetime(pred_df["date"])
+        train_fsi = fsi_df[
+            (fsi_df["date"] >= pred_df["date"].min()) &
+            (fsi_df["date"] <= pred_df["date"].max())
+        ].copy()
+    else:
+        train_fsi = fsi_df.copy()
 
-        chart_n   = train_size + val_size + test_size  # rows used at training time
-        train_fsi = fsi_df.iloc[:chart_n].copy()       # clip to training period
-
-        t_end   = fsi_df["date"].iloc[min(train_size - 1, n - 1)]
-        v_end   = fsi_df["date"].iloc[min(train_size + val_size - 1, n - 1)]
+    if has_preds and not train_fsi.empty:
+        if pred_df.dtypes.get("date") != "datetime64[ns]":
+            pred_df["date"] = pd.to_datetime(pred_df["date"])
+        val_dates  = pred_df[pred_df["split"] == "val"]["date"]
+        test_dates = pred_df[pred_df["split"] == "test"]["date"]
         s_start = train_fsi["date"].iloc[0]
-        s_end   = train_fsi["date"].iloc[-1]   # stops at test-end, not today
-
+        s_end   = train_fsi["date"].iloc[-1]
+        t_end_shade = val_dates.min()  if not val_dates.empty  else s_end
+        v_end_shade = test_dates.min() if not test_dates.empty else (
+            val_dates.max() if not val_dates.empty else s_end
+        )
         for x0, x1, color, label in [
-            (s_start, t_end, "rgba(56,139,253,0.07)",  "TRAIN (in-sample)"),
-            (t_end,   v_end, "rgba(240,180,41,0.10)",  "VAL"),
-            (v_end,   s_end, "rgba(46,160,67,0.10)",   "TEST"),
+            (s_start,      t_end_shade, "rgba(56,139,253,0.07)",  "TRAIN (in-sample)"),
+            (t_end_shade,  v_end_shade, "rgba(240,180,41,0.10)",  "VAL"),
+            (v_end_shade,  s_end,       "rgba(46,160,67,0.10)",   "TEST"),
         ]:
             fig.add_vrect(
                 x0=x0, x1=x1, fillcolor=color,
@@ -604,12 +675,10 @@ def render_ts_chart(data):
                 annotation_position="top left",
                 annotation_font={"size": 10, "color": "#8b949e"},
             )
-    else:
-        train_fsi = fsi_df  # fallback: no metadata, show all
 
     # --- FSI actual (clipped to training period) ---
     fig.add_trace(go.Scatter(
-        x=train_fsi["date"], y=train_fsi["fsi_value"],
+        x=train_fsi["date"], y=_to_idx(train_fsi["fsi_value"]),
         name="FSI Real",
         line={"color": "#388bfd", "width": 2},
         mode="lines",
@@ -639,7 +708,7 @@ def render_ts_chart(data):
             for ws, wdf in sdf.groupby("window_start"):
                 wdf = wdf.sort_values("horizon")
                 fig.add_trace(go.Scatter(
-                    x=wdf["date"], y=wdf["fsi_pred"],
+                    x=wdf["date"], y=_to_idx(wdf["fsi_pred"]),
                     name=f"Ventanas {split_name.upper()}" if first_window else None,
                     showlegend=first_window,
                     legendgroup=f"fan_{split_name}",
@@ -654,7 +723,7 @@ def render_ts_chart(data):
             h1_df = sdf[sdf["horizon"] == 1].sort_values("date")
             if not h1_df.empty:
                 fig.add_trace(go.Scatter(
-                    x=h1_df["date"], y=h1_df["fsi_pred"],
+                    x=h1_df["date"], y=_to_idx(h1_df["fsi_pred"]),
                     name=label_h1,
                     legendgroup=f"h1_{split_name}",
                     line={"color": bold_color, "width": 2, "dash": "dot"},
@@ -669,7 +738,7 @@ def render_ts_chart(data):
                 "bordercolor": "#30363d", "borderwidth": 1},
         xaxis={"gridcolor": "#21262d", "title": "Fecha", "tickformat": "%b %Y",
                "hoverformat": "%d %b %Y"},
-        yaxis={"gridcolor": "#21262d", "title": "FSI"},
+        yaxis={"gridcolor": "#21262d", "title": y_title},
         margin={"t": 16, "b": 40, "l": 60, "r": 20},
         hovermode="x unified",
     )
@@ -1358,8 +1427,10 @@ def render_compare_chart(selected_trials):
     Output("predict-date-dropdown", "options"),
     Output("predict-date-dropdown", "value"),
     Input("tabs", "value"),
+    Input("predict-base-year-check", "value"),
+    Input("predict-base-year-select", "value"),
 )
-def render_fsi_history_chart(tab):
+def render_fsi_history_chart(tab, base_year_active, base_year):
     if tab != "tab-predict":
         return go.Figure(), [], None
 
@@ -1371,6 +1442,24 @@ def render_fsi_history_chart(tab):
         return _empty_fig("Sin datos FSI — ejecutar build_fsi_target.py"), [], None
 
     fsi_df["date"] = pd.to_datetime(fsi_df["date"])
+
+    # --- Index-100 transformation ---
+    base_active = "on" in (base_year_active or [])
+    y_title = "FSI"
+    fsi_divisor = None
+    if base_active and base_year:
+        year_mask = fsi_df["date"].dt.year == int(base_year)
+        year_vals = fsi_df.loc[year_mask, "fsi_value"]
+        if not year_vals.empty and abs(year_vals.mean()) > 0.1:
+            fsi_divisor = year_vals.mean()
+            y_title = f"Indice FSI (base {base_year}=100)"
+
+    if fsi_divisor is not None:
+        fsi_df = fsi_df.copy()
+        fsi_df["fsi_value"] = fsi_df["fsi_value"] / fsi_divisor * 100
+        if not daily_df.empty:
+            daily_df = daily_df.copy()
+            daily_df["fsi_pred"] = daily_df["fsi_pred"] / fsi_divisor * 100
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -1419,7 +1508,7 @@ def render_fsi_history_chart(tab):
             rangeslider=dict(visible=False),
             type="date",
         ),
-        yaxis={"gridcolor": "#21262d", "title": "FSI"},
+        yaxis={"gridcolor": "#21262d", "title": y_title},
     )
 
     # Dropdown options: all FSI dates (sorted descending for usability)
