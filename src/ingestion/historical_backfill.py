@@ -19,6 +19,7 @@ import pandas as pd
 
 from src.ingestion.gdelt_ingest import fetch_and_store_gdelt
 from src.ingestion.rss_scraper import fetch_and_store_rss
+from src.ingestion.wayback_scraper import fetch_and_store_wayback
 from src.utils.log import get_logger
 
 log = get_logger(__name__)
@@ -57,6 +58,13 @@ def run_backfill(date_from: str, date_to: str) -> dict:
         except Exception as exc:
             log.warning("RSS failed for %s: %s", day_str, exc)
             errors.append({"date": day_str, "source": "rss", "error": str(exc)})
+
+        try:
+            wb_new = fetch_and_store_wayback(day_str, day_str)
+            day_count += wb_new
+        except Exception as exc:
+            log.warning("Wayback failed for %s: %s", day_str, exc)
+            errors.append({"date": day_str, "source": "wayback", "error": str(exc)})
 
         log.info("  Day %s: %d new articles", day_str, day_count)
         total_articles += day_count

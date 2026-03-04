@@ -2,7 +2,7 @@
 Training pipeline — Darts TiDE with Optuna hyperparameter optimisation.
 
 Workflow:
-  1. Optuna runs N_TRIALS, each trained on TRAIN (70%), evaluated on VAL (15%).
+  1. Optuna runs N_TRIALS, each trained on TRAIN (65%), evaluated on VAL (20%).
   2. Top-K trials by MAPE_val advance to test evaluation.
   3. Each finalist is retrained on TRAIN+VAL and evaluated on TEST (15%).
   4. The trial with best MAPE_test becomes the production model.
@@ -11,7 +11,8 @@ Workflow:
   7. Trial results written to optuna_trials table.
 
 Usage:
-    python training/train.py
+    python training/train.py [--start YYYYMMDD] [--end YYYYMMDD]
+    Default --end: 20260201 (hard-coded baseline cutoff).
 """
 import json
 import sys
@@ -41,8 +42,9 @@ log = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Split fractions
 # ---------------------------------------------------------------------------
-TRAIN_PCT = 0.70
-VAL_PCT   = 0.15
+TRAIN_PCT = 0.65
+VAL_PCT   = 0.20
+# TEST = remaining 15%
 
 INPUT_CHUNK  = 2
 OUTPUT_CHUNK = 1
@@ -52,12 +54,14 @@ STUDY_NAME   = "tide_bapro"
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_dataset(engine):
+def load_dataset(engine, date_from=None, date_to=None):
     """
     Join articles + article_embeddings + fsi_target on date.
     Mean-pool embeddings per business day.
     Only days with real article embeddings are included — days without
     articles are excluded entirely (no zero-vector fabrication).
+
+    date_from / date_to: optional YYYY-MM-DD strings to restrict the window.
     Returns DataFrame: date (datetime), vec (np.array), fsi_value (float).
     """
     with engine.connect() as conn:
@@ -109,7 +113,19 @@ def load_dataset(engine):
 
     df = pd.DataFrame(records)
     df["date"] = pd.to_datetime(df["date"])
-    return df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values("date").reset_index(drop=True)
+
+    if date_from:
+        df = df[df["date"] >= pd.Timestamp(date_from)].reset_index(drop=True)
+    if date_to:
+        df = df[df["date"] <= pd.Timestamp(date_to)].reset_index(drop=True)
+
+    if df.empty:
+        raise RuntimeError(
+            f"No article days in range [{date_from}, {date_to}]. "
+            "Run embed.py and backfill for this period first."
+        )
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -468,12 +484,21 @@ def write_training_loss(engine, model_version, trial_number, rank_val, work_dir)
 # ---------------------------------------------------------------------------
 
 def main():
+    import argparse
     import optuna
+
+    parser = argparse.ArgumentParser(description="Train TiDE model on FSI data")
+    parser.add_argument("--start", type=str, default=None, metavar="YYYYMMDD",
+                        help="Training window start date (default: all available data)")
+    parser.add_argument("--end", type=str, default="20260201", metavar="YYYYMMDD",
+                        help="Training window end date (default: 20260201)")
+    args = parser.parse_args()
+
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     engine = get_engine()
-    log.info("dataset_loading")
-    df = load_dataset(engine)
+    log.info("dataset_loading", date_from=args.start, date_to=args.end)
+    df = load_dataset(engine, date_from=args.start, date_to=args.end)
     n = len(df)
     assert n >= 10, f"Too few FSI samples to train: {n}"
     log.info("dataset_loaded", n=n,
@@ -501,10 +526,40 @@ def main():
         target = TimeSeries.from_dataframe(target_df, fill_missing_dates=False, freq="B")
     covariates = build_covariate_series(df)
 
-    target_train = target[:TRAIN_SIZE]
-    target_val   = target[:TRAIN_SIZE + VAL_SIZE]
+    # Slice by actual article-day calendar dates, not by integer position.
+    # target[:N] takes the first N *business-day* steps of the filled series,
+    # which is wrong when article days are concentrated in a short window after
+    # a multi-month gap (e.g. Dec articles + Jan gap + Feb articles).
+    from pandas.tseries.offsets import BDay as _BDay
+    _train_end = pd.Timestamp(df["date"].iloc[TRAIN_SIZE - 1])
+    _val_end   = pd.Timestamp(df["date"].iloc[TRAIN_SIZE + VAL_SIZE - 1])
+
+    target_train = target.drop_after(_train_end + _BDay(1))
+    target_val   = target.drop_after(_val_end + _BDay(1))
     target_test  = target
-    cov_full     = covariates
+
+    # Covariates sliced to each split; cov_full = full coverage up to last article day.
+    cov_full  = covariates
+    cov_train = covariates.drop_after(_train_end + _BDay(1))
+    cov_val   = covariates.drop_after(_val_end + _BDay(1))
+
+    # Safe rolling-window start: first article day of the split, capped so that
+    # the last prediction window fits within the target (overlap_end=False).
+    _val_start_ts  = pd.Timestamp(df["date"].iloc[TRAIN_SIZE])
+    _val_max_start = pd.Timestamp(target_val.time_index[-FORECAST_HORIZON])
+    if _val_start_ts > _val_max_start:
+        log.warning("val_start_capped_for_overlap",
+                    intended=str(_val_start_ts.date()),
+                    capped=str(_val_max_start.date()))
+        _val_start_ts = _val_max_start
+
+    _test_start_ts  = pd.Timestamp(df["date"].iloc[TRAIN_SIZE + VAL_SIZE])
+    _test_max_start = pd.Timestamp(target_test.time_index[-FORECAST_HORIZON])
+    if _test_start_ts > _test_max_start:
+        log.warning("test_start_capped_for_overlap",
+                    intended=str(_test_start_ts.date()),
+                    capped=str(_test_max_start.date()))
+        _test_start_ts = _test_max_start
 
     Path(ARTIFACTS_DIR).mkdir(parents=True, exist_ok=True)
     trials_dir = Path(ARTIFACTS_DIR) / "optuna_trials"
@@ -532,22 +587,18 @@ def main():
         model = _build_model(params, work, f"tide_trial_{trial.number}")
         model.fit(
             series=target_train,
-            past_covariates=cov_full[:TRAIN_SIZE],
-            future_covariates=cov_full[:TRAIN_SIZE],
+            past_covariates=cov_train,
+            future_covariates=cov_train,
             val_series=target_val,
-            val_past_covariates=cov_full,
-            val_future_covariates=cov_full,
+            val_past_covariates=cov_val,
+            val_future_covariates=cov_val,
             verbose=False,
         )
-        # Lag offset avoids look-back leakage; capped so at least 1 window fits
-        # (each window needs forecast_horizon steps ahead of start).
-        val_start = min(
-            TRAIN_SIZE + params["input_chunk_length"],
-            TRAIN_SIZE + VAL_SIZE - FORECAST_HORIZON,
-        )
+        # Val rolling window: start at first val article day (or earlier if needed
+        # to fit at least one full-horizon window with overlap_end=False).
         val_preds = _historical_forecasts(
-            model, target_val, cov_full[:TRAIN_SIZE + VAL_SIZE],
-            val_start,
+            model, target_val, cov_full,
+            _val_start_ts,
         )
         metrics = _eval_metrics(target_val, val_preds)
         _trial_val_preds[trial.number] = val_preds
@@ -584,21 +635,18 @@ def main():
         log.info("eval_test_start", rank=rank, trial=trial.number)
         model_eval = _build_model(params, work, f"tide_eval_rank{rank}")
         model_eval.fit(
-            series=target_val,  # = target[:TRAIN_SIZE + VAL_SIZE]
-            past_covariates=cov_full[:TRAIN_SIZE + VAL_SIZE],
-            future_covariates=cov_full[:TRAIN_SIZE + VAL_SIZE],
+            series=target_val,
+            past_covariates=cov_val,
+            future_covariates=cov_val,
             val_series=target_test,
-            val_past_covariates=cov_full,
-            val_future_covariates=cov_full,
+            val_past_covariates=covariates,
+            val_future_covariates=covariates,
             verbose=False,
         )
-        test_start = min(
-            TRAIN_SIZE + VAL_SIZE + params["input_chunk_length"],
-            len(target_test) - FORECAST_HORIZON,
-        )
+        # Test rolling window: start at first test article day (or earlier if needed).
         test_preds = _historical_forecasts(
             model_eval, target_test, cov_full,
-            test_start,
+            _test_start_ts,
         )
         test_metrics = _eval_metrics(target_test, test_preds)
         log.info("eval_test_done", rank=rank, trial=trial.number,
@@ -634,8 +682,8 @@ def main():
     model_prod = _build_model(best_params, prod_work, "tide_bapro", progress=True)
     model_prod.fit(
         series=target,
-        past_covariates=cov_full,
-        future_covariates=cov_full,
+        past_covariates=covariates,
+        future_covariates=covariates,
         verbose=True,
     )
     model_prod.save(TIDE_MODEL_PATH)
@@ -678,6 +726,16 @@ def main():
         "train_samples":   TRAIN_SIZE,
         "val_samples":     VAL_SIZE,
         "test_samples":    TEST_SIZE,
+        "training_start_date": df["date"].iloc[0].strftime("%Y-%m-%d"),
+        "training_end_date":   df["date"].iloc[-1].strftime("%Y-%m-%d"),
+        "split_dates": {
+            "train_start": df["date"].iloc[0].strftime("%Y-%m-%d"),
+            "train_end":   df["date"].iloc[TRAIN_SIZE - 1].strftime("%Y-%m-%d"),
+            "val_start":   df["date"].iloc[TRAIN_SIZE].strftime("%Y-%m-%d"),
+            "val_end":     df["date"].iloc[TRAIN_SIZE + VAL_SIZE - 1].strftime("%Y-%m-%d"),
+            "test_start":  df["date"].iloc[TRAIN_SIZE + VAL_SIZE].strftime("%Y-%m-%d"),
+            "test_end":    df["date"].iloc[-1].strftime("%Y-%m-%d"),
+        },
         # Primary metrics (MAPE)
         "mape_val_best":   best["mape_val"],
         "mape_test_prod":  best["mape_test"],
