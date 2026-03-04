@@ -74,7 +74,9 @@ Sign validated against PASO 2019 (Aug 12, 2019 stress peak): FSI value on that d
 - Input chunk: tuned by Optuna (candidates: 2, 5, up to min(10, TRAIN_SIZE-2)); output chunk: 1 business day ahead
 - Lag offset: `historical_forecasts` start at `split_boundary + input_chunk_length` for both val and test, so the look-back window never includes observations from the other split (no boundary leakage)
 - Optuna guard: trials where `input_chunk_length >= VAL_SIZE` or `>= TEST_SIZE` are pruned to avoid out-of-bounds errors
-- Covariates: mean-pooled 384-dim article embeddings per day (past + future); zero vector for days without articles
+- Covariates: 384-dim mean-pooled article embeddings per day (past + future); training uses only days with real embeddings — no zero-vector fabrication
+- Data integrity: `train.py` fails fast with an `error` log listing specific dates if any business day has no articles (every business day is expected to have news)
+- Hyperparameters: tuned with Optuna (stored in `optuna_trials` table)
 - Train/val/test split: 70/15/15% dynamic
 - Model artifact: `artifacts/tide_model.pt`
 

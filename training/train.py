@@ -56,6 +56,8 @@ def load_dataset(engine):
     """
     Join articles + article_embeddings + fsi_target on date.
     Mean-pool embeddings per business day.
+    Only days with real article embeddings are included — days without
+    articles are excluded entirely (no zero-vector fabrication).
     Returns DataFrame: date (datetime), vec (np.array), fsi_value (float).
     """
     with engine.connect() as conn:
@@ -87,16 +89,19 @@ def load_dataset(engine):
         date_vecs.setdefault(date_str, []).append(vec)
 
     mean_vecs = {d: np.mean(vecs, axis=0) for d, vecs in date_vecs.items()}
-    emb_dim   = next(iter(mean_vecs.values())).shape[0] if mean_vecs else 384
-    zero_vec  = np.zeros(emb_dim, dtype=np.float32)
+    fsi_lookup = {str(row[0])[:10]: float(row[1]) for row in fsi_rows}
 
+    # Only include days that have BOTH real FSI and real article embeddings.
+    # Days without articles are excluded — no zero-vector fabrication.
     records = []
-    for row in fsi_rows:
-        date_str = str(row[0])[:10]
+    for date_str, vec in mean_vecs.items():
+        fsi_val = fsi_lookup.get(date_str)
+        if fsi_val is None:
+            continue
         records.append({
             "date":      date_str,
-            "vec":       mean_vecs.get(date_str, zero_vec),
-            "fsi_value": float(row[1]),
+            "vec":       vec,
+            "fsi_value": fsi_val,
         })
 
     if not records:
@@ -486,6 +491,17 @@ def main():
         raise RuntimeError(f"Need at least 5 samples, got {n}.")
 
     target     = build_target_series(df)
+    nan_mask = target.to_dataframe().isna().any(axis=1)
+    if nan_mask.any():
+        missing = nan_mask[nan_mask].index.strftime("%Y-%m-%d").tolist()
+        log.error("training_target_has_gaps",
+                  count=len(missing), dates=missing,
+                  note="business days with no articles — check ingestion for these dates")
+        raise RuntimeError(
+            f"FSI target has {len(missing)} business day(s) with no articles: "
+            f"{missing[:5]}{'...' if len(missing) > 5 else ''}. "
+            f"Fix ingestion for those dates before training."
+        )
     covariates = build_covariate_series(df)
 
     target_train = target[:TRAIN_SIZE]

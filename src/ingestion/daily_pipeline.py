@@ -207,7 +207,6 @@ def _run_tide_prediction(
         value_cols=["value"],
         freq="B",
         fill_missing_dates=True,
-        fillna_value=0.0,
     )
 
     emb_dim = len(ctx["embedding"].iloc[0])
