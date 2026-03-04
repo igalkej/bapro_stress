@@ -135,7 +135,8 @@ OFR FSI composite is stored in `fsi_components` as reference but excluded from t
 - **Input**: `input_chunk_length` business days look-back (tuned by Optuna); 1 day ahead output
 - **Gap nowcasting**: `n = business days from last published FSI to target date`; uses real article embeddings for gap days as `future_covariates`
 - **Lag offset**: val/test evaluation starts at `split_boundary + input_chunk_length` to avoid look-back window leaking training observations into held-out sets
-- **Covariates**: mean-pooled 384-dim article embeddings (past + future); zero vector on days without articles
+- **Covariates**: mean-pooled 384-dim article embeddings (past + future); training uses only days with real embeddings — no zero-vector fabrication
+- **Data integrity**: `training/train.py` fails fast with an error log listing specific dates if any business day has no articles, so ingestion gaps are caught before training
 - **Uncertainty**: 95% CI from test-set RMSE
 - **Artifact**: `artifacts/tide_model.pt`
 
