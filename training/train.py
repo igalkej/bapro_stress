@@ -491,6 +491,17 @@ def main():
         raise RuntimeError(f"Need at least 5 samples, got {n}.")
 
     target     = build_target_series(df)
+    nan_mask = target.to_dataframe().isna().any(axis=1)
+    if nan_mask.any():
+        missing = nan_mask[nan_mask].index.strftime("%Y-%m-%d").tolist()
+        log.error("training_target_has_gaps",
+                  count=len(missing), dates=missing,
+                  note="business days with no articles — check ingestion for these dates")
+        raise RuntimeError(
+            f"FSI target has {len(missing)} business day(s) with no articles: "
+            f"{missing[:5]}{'...' if len(missing) > 5 else ''}. "
+            f"Fix ingestion for those dates before training."
+        )
     covariates = build_covariate_series(df)
 
     target_train = target[:TRAIN_SIZE]
