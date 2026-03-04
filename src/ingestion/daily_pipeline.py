@@ -201,17 +201,12 @@ def _run_tide_prediction(
     ctx = context_df.tail(input_chunk).reset_index(drop=True)
     ctx["date"] = pd.to_datetime(ctx["date"].astype(str).str[:10])
 
-    fsi_raw = TimeSeries.from_dataframe(
+    fsi_series = TimeSeries.from_dataframe(
         ctx[["date", "fsi_value"]].rename(columns={"fsi_value": "value"}),
         time_col="date",
         value_cols=["value"],
         freq="B",
         fill_missing_dates=True,
-    )
-    # Forward-fill any gap days in the context window (business days without
-    # articles that were excluded from context_df but needed for continuity).
-    fsi_series = TimeSeries.from_dataframe(
-        fsi_raw.to_dataframe().ffill().bfill(), freq="B"
     )
 
     emb_dim = len(ctx["embedding"].iloc[0])

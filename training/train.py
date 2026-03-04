@@ -117,15 +117,10 @@ def load_dataset(engine):
 # ---------------------------------------------------------------------------
 
 def build_target_series(df):
-    # Build a contiguous business-day series. Since df only contains days with
-    # real articles, fill_missing_dates adds NaN for gap days; ffill carries
-    # the last known FSI forward so TiDE sees a continuous target.
-    ts = TimeSeries.from_dataframe(
+    return TimeSeries.from_dataframe(
         df, time_col="date", value_cols="fsi_value",
         fill_missing_dates=True, freq="B",
     )
-    filled = ts.to_dataframe().ffill().bfill()
-    return TimeSeries.from_dataframe(filled, freq="B")
 
 
 def build_covariate_series(df):
